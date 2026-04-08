@@ -1,0 +1,13 @@
+{
+  "display_name": "Evolution World",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "dist/index.js",
+  "css": "dist/style.css",
+  "generate_interceptor": "ew_generation_interceptor",
+  "author": "Evolution World Team",
+  "version": "2.0.0",
+  "homePage": "",
+  "auto_update": true
+}
