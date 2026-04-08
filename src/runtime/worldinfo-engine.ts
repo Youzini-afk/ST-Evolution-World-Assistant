@@ -16,9 +16,11 @@
  */
 
 import { createRenderContext, evalEjsTemplate } from './ejs-internal';
+import { getCharWorldbookNames, getLorebookEntries, getWorldbook, type WbEntry } from './compat/worldbook';
 import { simpleHash } from './helpers';
 import { isLikelyMvuWorldInfoContent, isMvuTaggedWorldInfoNameOrComment } from './mvu-compat';
 import { EwSettings } from './types';
+import { tryGetSTContext } from '../st-adapter';
 
 // ---------------------------------------------------------------------------
 // ST Constants (replicated locally to avoid import dependency)
@@ -60,37 +62,7 @@ const DEFAULT_DEPTH = 4;
 // ---------------------------------------------------------------------------
 
 /** Minimal worldbook entry as returned by ST's getWorldbook API */
-interface RawWbEntry {
-  uid: number;
-  name: string;
-  comment?: string;
-  content: string;
-  enabled: boolean;
-  disable?: boolean;
-  position: {
-    type: string;
-    role: string;
-    depth: number;
-    order: number;
-  };
-  strategy: {
-    type: string;
-    keys: string[];
-    keys_secondary: { logic: string; keys: string[] };
-    scan_depth: string | number;
-  };
-  probability: number;
-  recursion: {
-    prevent_incoming: boolean;
-    prevent_outgoing: boolean;
-    delay_until: number | null;
-  };
-  effect: {
-    sticky: number | null;
-    cooldown: number | null;
-    delay: number | null;
-  };
-  extra: Record<string, any>;
+interface RawWbEntry extends WbEntry {
   // Legacy ST format fields (extensions-based)
   extensions?: {
     position?: number;
@@ -157,14 +129,9 @@ export interface ResolvedWorldInfo {
 // ST Runtime Accessors
 // ---------------------------------------------------------------------------
 
-declare function getWorldbook(name: string): Promise<RawWbEntry[]>;
-declare function getLorebookEntries(name: string): Promise<Array<{ uid: number; comment: string; content: string }>>;
-declare function getCharWorldbookNames(target: 'current'): { primary: string | null; additional: string[] };
-declare const SillyTavern: { getContext(): Record<string, any> } | undefined;
-
 function getStContext(): Record<string, any> {
   try {
-    return SillyTavern?.getContext?.() ?? {};
+    return (tryGetSTContext() as Record<string, any> | undefined) ?? {};
   } catch {
     return {};
   }
@@ -682,7 +649,7 @@ async function collectAllWorldbookEntries(): Promise<NormalizedEntry[]> {
 
   // 1. Character primary worldbook
   try {
-    const charWb = getCharWorldbookNames('current');
+    const charWb = getCharWorldbookNames();
     if (charWb.primary) {
       await loadWbOnce(charWb.primary);
     }
@@ -767,7 +734,7 @@ export async function collectIgnoredWorldInfoContents(): Promise<string[]> {
   }
 
   try {
-    const charWb = getCharWorldbookNames('current');
+    const charWb = getCharWorldbookNames();
     if (charWb.primary) {
       await loadWbOnce(charWb.primary);
     }

@@ -12,6 +12,48 @@ import { getSTContext, isSTReady } from "./st-adapter";
 
 console.log("[Evolution World] 扩展脚本已加载");
 
+const DISPOSE_EVENTS = ["pagehide", "beforeunload", "unload"] as const;
+let lifecycleDisposeRegistered = false;
+let lifecycleDisposed = false;
+let lifecycleDisposeHandler: ((event: Event) => void) | null = null;
+
+function unregisterLifecycleDispose(): void {
+  if (!lifecycleDisposeHandler) {
+    return;
+  }
+
+  for (const eventName of DISPOSE_EVENTS) {
+    window.removeEventListener(eventName, lifecycleDisposeHandler);
+  }
+  lifecycleDisposeHandler = null;
+  lifecycleDisposeRegistered = false;
+}
+
+function registerLifecycleDispose(dispose: () => void): void {
+  if (lifecycleDisposeRegistered) {
+    return;
+  }
+
+  lifecycleDisposeHandler = () => {
+    if (lifecycleDisposed) {
+      return;
+    }
+    lifecycleDisposed = true;
+    try {
+      dispose();
+    } catch (error) {
+      console.error("[Evolution World] 生命周期清理失败:", error);
+    } finally {
+      unregisterLifecycleDispose();
+    }
+  };
+
+  for (const eventName of DISPOSE_EVENTS) {
+    window.addEventListener(eventName, lifecycleDisposeHandler);
+  }
+  lifecycleDisposeRegistered = true;
+}
+
 // 使用 globalThis.jQuery 确保在 module scope 中能找到全局变量
 const jq = (globalThis as any).jQuery || (globalThis as any).$;
 
@@ -37,7 +79,7 @@ if (typeof jq === "function") {
       const ctx = getSTContext();
       console.info("[Evolution World] ST context 已就绪");
 
-      const [{ initRuntime }, { mountUI }] = await Promise.all([
+      const [{ disposeRuntime, initRuntime }, { mountUI, unmountUI }] = await Promise.all([
         import(/* webpackMode: "eager" */ "./runtime/main"),
         import(/* webpackMode: "eager" */ "./ui/mount"),
       ]);
@@ -49,6 +91,12 @@ if (typeof jq === "function") {
       // 挂载 UI (FAB + 魔法棒 + 浮动面板)
       mountUI();
       console.log("[Evolution World] UI 挂载完成");
+
+      registerLifecycleDispose(() => {
+        unmountUI();
+        disposeRuntime();
+        console.info("[Evolution World] 生命周期卸载完成");
+      });
 
       (globalThis as any).toastr?.success?.(
         "Evolution World 扩展已加载！",

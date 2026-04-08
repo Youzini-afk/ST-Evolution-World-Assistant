@@ -12,7 +12,7 @@
  *    Does NOT affect AI context — purely for UI performance.
  */
 
-declare const SillyTavern: { getContext(): Record<string, any> } | undefined;
+import { tryGetSTContext } from '../st-adapter';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -46,7 +46,7 @@ export function isEwHiddenMessageIndex(index: number): boolean {
 
 function getChat(): any[] | null {
   try {
-    const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern?.getContext() : undefined;
+    const ctx = tryGetSTContext();
     return ctx?.chat ?? null;
   } catch {
     return null;

@@ -32,11 +32,8 @@ interface RegexScript {
  * 从三个来源收集正则脚本：全局、预设绑定、角色卡局部。
  * 返回合并后的脚本数组（去重依据 id）。
  */
-declare const SillyTavern: { getContext(): Record<string, any> } | undefined;
-declare const getTavernRegexes:
-  | ((option: { type: 'global' | 'preset' | 'character'; name?: string }) => any[])
-  | undefined;
-declare const isCharacterTavernRegexesEnabled: (() => boolean) | undefined;
+type TavernRegexGetter = ((option: { type: 'global' | 'preset' | 'character'; name?: string }) => any[]) | undefined;
+type CharacterRegexEnabledGetter = (() => boolean) | undefined;
 
 export function collectAllRegexScripts(): RegexScript[] {
   const scriptsById = new Map<string, RegexScript>();
@@ -44,6 +41,9 @@ export function collectAllRegexScripts(): RegexScript[] {
 
   // 获取 ST 上下文
   const ctx = tryGetSTContext() as Record<string, any> | undefined;
+  const getTavernRegexes: TavernRegexGetter = ctx?.getTavernRegexes ?? win.getTavernRegexes;
+  const isCharacterTavernRegexesEnabled: CharacterRegexEnabledGetter =
+    ctx?.isCharacterTavernRegexesEnabled ?? win.isCharacterTavernRegexesEnabled;
 
   let globalCount = 0;
   let presetCount = 0;

@@ -8,6 +8,7 @@ export type EwUnsupportedContextReason =
 export type EwSettingsMigrationSource =
   | "assistant"
   | "legacy:evolution_world"
+  | "legacy:script_local_storage"
   | "initialized_empty"
   | "unknown";
 

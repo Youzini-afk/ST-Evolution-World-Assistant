@@ -30,10 +30,7 @@ declare function getWorldInfoPrompt(
   worldInfoBefore?: string;
   worldInfoAfter?: string;
 }>;
-declare const SillyTavern: { getContext(): Record<string, any> } | undefined;
-declare const characters: SillyTavern.v1CharData[] | undefined;
 declare const this_chid: number | string | undefined;
-declare const power_user: Record<string, any> | undefined;
 
 type PromptDiagnosticKey =
   | 'main'
@@ -196,11 +193,10 @@ function getRuntimeCharacters(): SillyTavern.v1CharData[] {
   const ctx = getRuntimeContext();
   const candidates = [
     hostRuntime.SillyTavern?.characters,
-    (SillyTavern as any)?.characters,
     ctx?.characters,
     hostRuntime.characters,
+    (globalThis as any).SillyTavern?.characters,
     (globalThis as any).characters,
-    characters,
   ];
 
   for (const candidate of candidates) {
@@ -605,7 +601,6 @@ function getRuntimePersonaDescription(): { value: string; diagnostic: PromptMark
         label: 'globalThis.power_user.persona_description',
         value: (globalThis as any).power_user?.persona_description,
       },
-      { label: 'power_user.persona_description', value: power_user?.persona_description },
       { label: 'getCharacterCardFields().persona', value: getRuntimeCharacterCardFields()?.persona },
     ],
     '按 persona_description 的多路径回退顺序选取',

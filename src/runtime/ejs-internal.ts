@@ -13,6 +13,7 @@
 // We side-import it so webpack bundles it, then access the global it creates.
 import '../libs/ejs';
 import { getRuntimeState } from './state';
+import { tryGetSTContext } from '../st-adapter';
 
 const ejs = (globalThis as any).ejs as {
   compile(template: string, opts?: Record<string, any>): (...args: any[]) => any;
@@ -51,11 +52,9 @@ export interface EjsRenderContext {
 // ST Runtime Accessors
 // ---------------------------------------------------------------------------
 
-declare const SillyTavern: { getContext(): Record<string, any> } | undefined;
-
 function getStContext(): Record<string, any> {
   try {
-    return SillyTavern?.getContext?.() ?? {};
+    return (tryGetSTContext() as Record<string, any> | undefined) ?? {};
   } catch {
     return {};
   }

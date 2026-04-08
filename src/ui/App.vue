@@ -601,7 +601,7 @@ import { resolveControllerEntryNameMap } from '../runtime/helpers';
 import { applyHideSettings, unhideAll } from '../runtime/hide-engine';
 import { patchSettings } from '../runtime/settings';
 import type { EwApiPreset, EwFlowConfig } from '../runtime/types';
-import { getHostDocument, getHostRuntime } from '../st-adapter';
+import { getHostDocument, getHostRuntime, tryGetSTContext } from '../st-adapter';
 import EwApiPresetCard from './components/EwApiPresetCard.vue';
 import EwDebugPanel from './components/EwDebugPanel.vue';
 import EwFieldRow from './components/EwFieldRow.vue';
@@ -693,9 +693,10 @@ async function refreshEnvironmentStatus() {
   };
 
   const host = getHostWindowForEnv();
+  const stContext = tryGetSTContext() as Record<string, any> | undefined;
   const extensionSettings =
+    stContext?.extensionSettings ??
     host.extension_settings ??
-    host.SillyTavern?.getContext?.()?.extensionSettings ??
     host.SillyTavern?.extensionSettings;
   const promptTemplateSettings = extensionSettings?.EjsTemplate;
   const promptTemplateApi = host.EjsTemplate;

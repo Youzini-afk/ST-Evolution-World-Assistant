@@ -150,6 +150,7 @@ export function getEventTypes(): Record<string, string> {
 
 const ASSISTANT_SETTINGS_KEY = "evolution_world_assistant";
 const LEGACY_SETTINGS_KEYS = ["evolution_world"] as const;
+const LEGACY_SCRIPT_LOCAL_STORAGE_KEY = "evolution_world_assistant";
 let lastLoggedEventTypesSource: EwHostEventTypesSource | null = null;
 let lastLoggedMigrationSource: string | null = null;
 
@@ -251,6 +252,63 @@ function cloneSettingsBucket<T>(value: T): T {
   }
 }
 
+function readLegacyScriptLocalStorageBucket(): Record<string, any> | null {
+  try {
+    const runtime = getHostRuntime() as { localStorage?: Storage };
+    const storage = runtime.localStorage ?? globalThis.localStorage;
+    if (!storage) {
+      return null;
+    }
+
+    const raw = storage.getItem(LEGACY_SCRIPT_LOCAL_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    return parsed as Record<string, any>;
+  } catch (error) {
+    console.warn(
+      "[Evolution World] Failed to read legacy script localStorage settings bucket:",
+      error,
+    );
+    return null;
+  }
+}
+
+function tryMigrateScriptLocalStorageBucket(
+  ctx: STContext,
+  buckets: Record<string, any>,
+  assistantBucket?: Record<string, any>,
+): Record<string, any> | null {
+  const scriptBucket = readLegacyScriptLocalStorageBucket();
+  if (!scriptBucket) {
+    return null;
+  }
+
+  if (
+    assistantBucket &&
+    !shouldUseLegacySettingsBucket(assistantBucket, scriptBucket)
+  ) {
+    return null;
+  }
+
+  const migratedBucket = cloneSettingsBucket(scriptBucket);
+  buckets[ASSISTANT_SETTINGS_KEY] = migratedBucket;
+  ctx.saveSettingsDebounced();
+  setSettingsMigrationSource("legacy:script_local_storage");
+  logSettingsMigration(
+    assistantBucket
+      ? "recovered from script localStorage"
+      : "migrated from script localStorage",
+  );
+  return migratedBucket as Record<string, any>;
+}
+
 function logSettingsMigration(source: string): void {
   if (source === lastLoggedMigrationSource) {
     return;
@@ -288,6 +346,15 @@ export function readExtensionSettings(): Record<string, any> {
       }
     }
 
+    const migratedFromScriptStorage = tryMigrateScriptLocalStorageBucket(
+      ctx,
+      buckets,
+      assistantBucket as Record<string, any>,
+    );
+    if (migratedFromScriptStorage) {
+      return migratedFromScriptStorage;
+    }
+
     setSettingsMigrationSource("assistant");
     logSettingsMigration(ASSISTANT_SETTINGS_KEY);
     return assistantBucket as Record<string, any>;
@@ -303,6 +370,14 @@ export function readExtensionSettings(): Record<string, any> {
       logSettingsMigration(`migrated from ${legacyKey}`);
       return migratedBucket as Record<string, any>;
     }
+  }
+
+  const migratedFromScriptStorage = tryMigrateScriptLocalStorageBucket(
+    ctx,
+    buckets,
+  );
+  if (migratedFromScriptStorage) {
+    return migratedFromScriptStorage;
   }
 
   if (!buckets[ASSISTANT_SETTINGS_KEY] || typeof buckets[ASSISTANT_SETTINGS_KEY] !== "object") {
