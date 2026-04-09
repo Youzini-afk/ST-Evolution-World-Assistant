@@ -174,13 +174,20 @@ const queuedBeforeReplyJobKeys = new Set<string>();
 const queuedAfterReplyJobKeys = new Set<string>();
 const queuedAfterReplyDedupKeys = new Set<string>();
 const processedAfterReplyIdentityKeys = new Set<string>();
+const pendingAfterReplyMessageReceivedFallbacks = new Map<
+  number,
+  ReturnType<typeof setTimeout>
+>();
 const failedAfterReplyJobsByChat = new Map<string, FailedAfterReplyQueueJob[]>();
 let workflowTaskDrainPromise: Promise<void> | null = null;
 let workflowTaskSeq = 0;
 const lastBeforeReplyTriggerByIdentityKey = new Map<string, number>();
 const lastAfterReplyTriggerByIdentityKey = new Map<string, number>();
+let lastObservedGenerationEndedSeq = 0;
 const MIN_BEFORE_REPLY_INTERVAL_MS = 2500;
 const MIN_AFTER_REPLY_INTERVAL_MS = 3000;
+const AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_POLL_MS = 250;
+const AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MS = 12000;
 let runtimeEventsInitialized = false;
 const NON_SEND_GENERATION_TYPES = new Set(["continue", "regenerate", "swipe"]);
 const WORKFLOW_NOTICE_COLLAPSE_MS = 5000;
@@ -240,8 +247,13 @@ function clearQueuedWorkflowTasks(reason: string) {
   queuedAfterReplyJobKeys.clear();
   queuedAfterReplyDedupKeys.clear();
   processedAfterReplyIdentityKeys.clear();
+  for (const handle of pendingAfterReplyMessageReceivedFallbacks.values()) {
+    clearTimeout(handle);
+  }
+  pendingAfterReplyMessageReceivedFallbacks.clear();
   lastBeforeReplyTriggerByIdentityKey.clear();
   lastAfterReplyTriggerByIdentityKey.clear();
+  lastObservedGenerationEndedSeq = 0;
 }
 
 function enqueueWorkflowTask<T>(
@@ -2591,13 +2603,13 @@ async function executeWorkflowWithPolicy(
         processingReminder.update(
           buildAbortableReminder(
             autoRerollIntervalMs > 0
-              ? `工作流失败，${settings.auto_reroll_interval_seconds} 秒后开始第 ${nextAttemptNumber}/${autoRerollMaxAttempts} 次自动重roll… ${retryReason}`
-              : `工作流失败，准备开始第 ${nextAttemptNumber}/${autoRerollMaxAttempts} 次自动重roll… ${retryReason}`,
-            "warning",
+              ? `首轮未通过，${settings.auto_reroll_interval_seconds} 秒后开始第 ${nextAttemptNumber}/${autoRerollMaxAttempts} 次自动重roll… ${retryReason}`
+              : `首轮未通过，准备开始第 ${nextAttemptNumber}/${autoRerollMaxAttempts} 次自动重roll… ${retryReason}`,
+            "info",
           ),
         );
-        toastr.warning(
-          `工作流失败，准备进行第 ${nextAttemptNumber}/${autoRerollMaxAttempts} 次自动重roll: ${retryReason}`,
+        toastr.info(
+          `首轮未通过，准备进行第 ${nextAttemptNumber}/${autoRerollMaxAttempts} 次自动重roll：${retryReason}`,
           "Evolution World",
         );
 
@@ -3133,10 +3145,101 @@ function isAssistantMessage(messageId: number): boolean {
   }
 }
 
+function clearPendingAfterReplyMessageReceivedFallback(messageId: number): void {
+  const handle = pendingAfterReplyMessageReceivedFallbacks.get(messageId);
+  if (!handle) {
+    return;
+  }
+
+  clearTimeout(handle);
+  pendingAfterReplyMessageReceivedFallbacks.delete(messageId);
+}
+
+function markGenerationEndedObserved(): void {
+  const generationSeq = Math.max(
+    0,
+    Math.trunc(Number(getRuntimeState().last_generation?.seq ?? 0) || 0),
+  );
+  if (generationSeq > lastObservedGenerationEndedSeq) {
+    lastObservedGenerationEndedSeq = generationSeq;
+  }
+}
+
+function hasObservedGenerationEndForSeq(expectedGenerationSeq: number): boolean {
+  if (!Number.isFinite(expectedGenerationSeq) || expectedGenerationSeq <= 0) {
+    return false;
+  }
+  return lastObservedGenerationEndedSeq >= expectedGenerationSeq;
+}
+
+function scheduleAfterReplyFromMessageReceived(
+  messageId: number,
+  type: string,
+): void {
+  if (!isAssistantMessage(messageId)) {
+    return;
+  }
+
+  clearPendingAfterReplyMessageReceivedFallback(messageId);
+
+  const expectedGenerationSeq = Math.max(
+    0,
+    Math.trunc(
+      Number(
+        getRuntimeState().after_reply.pending_generation_seq ||
+          getRuntimeState().last_generation?.seq ||
+          0,
+      ) || 0,
+    ),
+  );
+  const startedAt = Date.now();
+
+  const poll = () => {
+    if (!pendingAfterReplyMessageReceivedFallbacks.has(messageId)) {
+      return;
+    }
+
+    const generationEnded = hasObservedGenerationEndForSeq(expectedGenerationSeq);
+    const timedOut =
+      Date.now() - startedAt >= AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MS;
+
+    if (generationEnded || timedOut) {
+      pendingAfterReplyMessageReceivedFallbacks.delete(messageId);
+      if (timedOut) {
+        console.debug(
+          `[Evolution World] after_reply fallback waited ${AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MS}ms without GENERATION_ENDED, using delayed message_received path for assistant floor #${messageId}`,
+        );
+      }
+      void onAfterReplyMessage(
+        messageId,
+        type,
+        generationEnded ? "message_received_fallback" : "message_received_timeout",
+      );
+      return;
+    }
+
+    const nextHandle = scheduleManagedRuntimeTimeout(
+      poll,
+      AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_POLL_MS,
+    );
+    pendingAfterReplyMessageReceivedFallbacks.set(messageId, nextHandle);
+  };
+
+  const initialHandle = scheduleManagedRuntimeTimeout(
+    poll,
+    AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_POLL_MS,
+  );
+  pendingAfterReplyMessageReceivedFallbacks.set(messageId, initialHandle);
+}
+
 async function onAfterReplyMessage(
   messageId: number,
   type: string,
-  source: "message_received" | "generation_ended",
+  source:
+    | "message_received"
+    | "message_received_fallback"
+    | "message_received_timeout"
+    | "generation_ended",
 ) {
   const settings = getSettings();
   const pendingBeforeReplyBinding = pruneExpiredBeforeReplyBindingPending();
@@ -3828,13 +3931,15 @@ export function initRuntimeEvents() {
       onSTEvent(
         eventTypes.MESSAGE_RECEIVED,
         async (messageId: number, type: string) => {
-          await onAfterReplyMessage(messageId, type, "message_received");
+          scheduleAfterReplyFromMessageReceived(messageId, type);
         },
       ),
     );
 
     listenerStops.push(
       onSTEvent(eventTypes.GENERATION_ENDED, async (messageId: number) => {
+        markGenerationEndedObserved();
+        clearPendingAfterReplyMessageReceivedFallback(messageId);
         const type = getRuntimeState().last_generation?.type ?? "normal";
         await onAfterReplyMessage(messageId, type, "generation_ended");
       }),
