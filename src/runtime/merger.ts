@@ -1,6 +1,6 @@
 import { ControllerModel } from './contracts';
 import { resolveControllerEntryNameMap } from './helpers';
-import { EwSettings, MergeInput, MergedPlan, MergedWorldbookDesiredEntry } from './types';
+import { EwSettings, MergeInput, MergedPlan, MergedWorldbookDesiredEntry, MergedWorldbookRemoveEntry } from './types';
 
 function comparePriority(
   lhs: { priority: number; flow_order: number },
@@ -56,6 +56,7 @@ export function mergeFlowResults(results: MergeInput, settings: EwSettings): Mer
   );
 
   const desiredEntries: MergedWorldbookDesiredEntry[] = [];
+  const removeEntries: MergedWorldbookRemoveEntry[] = [];
   const controllerModels = new Map<string, MergedPlan['controller_models'][number]>();
   const replyParts: string[] = [];
   const diagnostics: Record<string, any> = {};
@@ -98,11 +99,20 @@ export function mergeFlowResults(results: MergeInput, settings: EwSettings): Mer
       }
     }
 
-    if (worldbookOps.remove_entries.length > 0) {
-      console.warn(
-        `[EW Merger] remove_entries from flow "${result.flow.id}" ignored:`,
-        worldbookOps.remove_entries.map(entry => entry.name),
+    for (const removal of worldbookOps.remove_entries) {
+      const normalizedName = normalizeEntryName(
+        removal.name,
+        settings.dynamic_entry_prefix,
+        settings.controller_entry_prefix,
       );
+
+      removeEntries.push({
+        name: normalizedName,
+        source_flow_id: result.flow.id,
+        source_flow_name: result.flow.name?.trim() || result.flow.id,
+        priority,
+        flow_order: flowOrder,
+      });
     }
 
     if (normalizedControllerModel) {
@@ -143,7 +153,7 @@ export function mergeFlowResults(results: MergeInput, settings: EwSettings): Mer
   return {
     worldbook: {
       desired_entries: desiredEntries,
-      remove_entries: [],
+      remove_entries: removeEntries,
     },
     controller_models: normalizedControllers,
     reply_instruction: replyParts.join('\n\n'),

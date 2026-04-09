@@ -86,7 +86,7 @@ function toWorldInfoData(payload: WorldInfoPayload, worldInfoName: string): StWo
   }
 
   throw new Error(
-    `[Compat] ${worldInfoName} received invalid worldinfo payload`,
+    `世界书数据无效：${worldInfoName}`,
   );
 }
 
@@ -312,7 +312,7 @@ async function fetchWorldInfoPayload(name: string): Promise<WorldInfoPayload> {
     body: JSON.stringify({ name }),
   });
   if (!response.ok) {
-    throw new Error(`[Compat] getWorldbook('${name}') failed: ${response.status}`);
+    throw new Error(`读取世界书 "${name}" 失败：HTTP ${response.status}`);
   }
   return await response.json();
 }
@@ -344,7 +344,7 @@ async function saveWorldInfoPayload(name: string, data: StWorldInfoData): Promis
     body: JSON.stringify({ name, data }),
   });
   if (!response.ok) {
-    throw new Error(`[Compat] replaceWorldbook('${name}') failed: ${response.status}`);
+    throw new Error(`写回世界书 "${name}" 失败：HTTP ${response.status}`);
   }
 }
 
@@ -355,7 +355,7 @@ async function verifyWorldInfoPersistence(name: string, expectedEntries: WbEntry
   const persistedComparable = canonicalizeEntries(stEntriesToArray(persistedData.entries));
 
   if (!_.isEqual(expectedComparable, persistedComparable)) {
-    throw new Error(`[Compat] replaceWorldbook('${name}') verification failed: persisted entries differ from expected state`);
+    throw new Error(`世界书 "${name}" 写后核验失败：持久化结果与预期不一致`);
   }
 }
 

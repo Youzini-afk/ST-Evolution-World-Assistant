@@ -10,12 +10,14 @@ import { redactDebugPayload } from "./redaction";
 import { getSettings, setLastIo, setLastRun } from "./settings";
 import { commitMergedPlan } from "./transaction";
 import {
+  CommitSummary,
   ContextCursor,
   ControllerTemplateSlot,
   WorkflowFailure,
   DispatchFlowAttempt,
   DispatchFlowResult,
   RunSummarySchema,
+  WorkflowWarning,
   WorkflowCapsuleMode,
   WorkflowJobType,
   WorkflowProgressUpdate,
@@ -183,6 +185,41 @@ function buildFailureFromAttempts(
   };
 }
 
+function buildRunWarningFromCommitSummary(
+  commitSummary: CommitSummary | null,
+): WorkflowWarning | null {
+  if (!commitSummary) {
+    return null;
+  }
+
+  const dynChangeCount =
+    commitSummary.dyn_entries_created +
+    commitSummary.dyn_entries_updated +
+    commitSummary.dyn_entries_removed;
+  if (
+    commitSummary.dyn_entries_requested > 0 &&
+    dynChangeCount === 0 &&
+    commitSummary.controller_entries_updated > 0
+  ) {
+    return {
+      code: "dyn_not_updated",
+      summary: "本轮请求了动态条目，但最终只有控制器仓库发生变化。",
+      detail:
+        `目标世界书：${commitSummary.target_worldbook_name || "(none)"}；` +
+        `动态条目请求=${commitSummary.dyn_entries_requested}，动态条目变化=${dynChangeCount}，` +
+        `控制器变化=${commitSummary.controller_entries_updated}。`,
+    };
+  }
+
+  return null;
+}
+
+export function buildRunWarningFromCommitSummaryForTest(
+  commitSummary: CommitSummary | null,
+): WorkflowWarning | null {
+  return buildRunWarningFromCommitSummary(commitSummary);
+}
+
 async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -250,6 +287,7 @@ export async function runWorkflow(
   let diagnostics: Record<string, any> = {};
   let targetWorldbookName = "";
   let commitSummary: import("./types").CommitSummary | null = null;
+  let runWarning: WorkflowWarning | null = null;
   let attemptedFlowCount = 0;
 
   try {
@@ -387,6 +425,7 @@ export async function runWorkflow(
       worldbook_verified: commitResult.worldbook_verified,
       effective_change_count: commitResult.effective_change_count,
     };
+    runWarning = buildRunWarningFromCommitSummary(commitSummary);
     throwIfWorkflowCancelled(input);
 
     if (commitResult.effective_change_count === 0 && !mergedPlan.reply_instruction.trim()) {
@@ -428,6 +467,7 @@ export async function runWorkflow(
         mode: input.mode,
         target_worldbook_name: commitResult.target_worldbook_name,
         commit: commitSummary,
+        warning: runWarning,
         failure: dispatchFailure,
         diagnostics,
       });
@@ -454,6 +494,7 @@ export async function runWorkflow(
       mode: input.mode,
       target_worldbook_name: commitResult.target_worldbook_name,
       commit: commitSummary,
+      warning: runWarning,
       failure: null,
       diagnostics,
     });
@@ -507,6 +548,7 @@ export async function runWorkflow(
       mode: input.mode,
       target_worldbook_name: failure?.target_worldbook_name || targetWorldbookName,
       commit: commitSummary,
+      warning: runWarning,
       failure,
       diagnostics,
     });

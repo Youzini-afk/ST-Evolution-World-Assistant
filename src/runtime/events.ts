@@ -3511,7 +3511,6 @@ export async function rederiveWorkflowAtFloor(
     anchorMessageId,
     "history",
   );
-  const oldSnapshot = oldSnapshotRead?.snapshot ?? null;
 
   const sourceUserText = String(
     getChatMessages(beforeReplySourceMessageId)[0]?.message ?? "",
@@ -3634,11 +3633,10 @@ export async function rederiveWorkflowAtFloor(
       anchorMessageId,
       "history",
     );
-    const newSnapshot = newSnapshotRead?.snapshot ?? null;
     const writebackResult = await applySnapshotDiffToCurrentWorldbook(
       settings,
-      oldSnapshot,
-      newSnapshot,
+      oldSnapshotRead,
+      newSnapshotRead,
     );
     await writeRederiveMeta(anchorMessageId, {
       source_job: "historical_rederive",

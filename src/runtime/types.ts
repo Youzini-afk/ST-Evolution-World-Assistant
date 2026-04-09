@@ -428,6 +428,7 @@ export const WorkflowFailureCodeSchema = z.enum([
   'empty_desired_entry',
   'response_status_not_ok',
   'no_effective_write',
+  'snapshot_resolution_unsafe',
   'http_error',
   'auth_error',
   'permission_error',
@@ -533,6 +534,16 @@ export const CommitSummarySchema = z.object({
   effective_change_count: z.coerce.number().int().min(0).default(0),
 });
 
+export const WorkflowWarningCodeSchema = z.enum([
+  'dyn_not_updated',
+]);
+
+export const WorkflowWarningSchema = z.object({
+  code: WorkflowWarningCodeSchema,
+  summary: z.string().default(''),
+  detail: z.string().default(''),
+});
+
 export const RunSummarySchema = z.object({
   at: z.coerce.number().default(0),
   ok: z.boolean().default(false),
@@ -544,6 +555,7 @@ export const RunSummarySchema = z.object({
   mode: z.enum(['auto', 'manual']).default('auto'),
   target_worldbook_name: z.string().default(''),
   commit: CommitSummarySchema.nullable().default(null),
+  warning: WorkflowWarningSchema.nullable().default(null),
   diagnostics: z.record(z.string(), z.any()).default({}),
   failure: WorkflowFailureSchema.nullable().default(null),
 });
@@ -601,6 +613,8 @@ export type LastIoSummary = z.infer<typeof LastIoSummarySchema>;
 export type WorkflowFailureCode = z.infer<typeof WorkflowFailureCodeSchema>;
 export type WorkflowFailureStage = z.infer<typeof WorkflowFailureStageSchema>;
 export type WorkflowFailure = z.infer<typeof WorkflowFailureSchema>;
+export type WorkflowWarningCode = z.infer<typeof WorkflowWarningCodeSchema>;
+export type WorkflowWarning = z.infer<typeof WorkflowWarningSchema>;
 export type CommitSummary = z.infer<typeof CommitSummarySchema>;
 export type WorkflowFailureDiagnostic = NonNullable<RunSummary['failure']>;
 
@@ -720,10 +734,18 @@ export type MergedWorldbookDesiredEntry = {
   dyn_write: DynWriteConfig;
 };
 
+export type MergedWorldbookRemoveEntry = {
+  name: string;
+  source_flow_id: string;
+  source_flow_name: string;
+  priority: number;
+  flow_order: number;
+};
+
 export type MergedPlan = {
   worldbook: {
     desired_entries: MergedWorldbookDesiredEntry[];
-    remove_entries: Array<{ name: string }>;
+    remove_entries: MergedWorldbookRemoveEntry[];
   };
   controller_models: ControllerModelSlot[];
   reply_instruction: string;

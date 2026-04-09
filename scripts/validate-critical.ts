@@ -8,9 +8,19 @@ import {
   sanitizeLastIoSummary,
   sanitizeSettingsForShared,
 } from '../src/runtime/redaction';
-import { EwSettingsSchema, LastIoSummarySchema } from '../src/runtime/types';
+import {
+  CommitSummarySchema,
+  DynWriteConfigSchema,
+  EwSettingsSchema,
+  LastIoSummarySchema,
+  type MergedWorldbookDesiredEntry,
+  type MergedWorldbookRemoveEntry,
+} from '../src/runtime/types';
 import { mergeSharedSettingsWithLocalFallback as mergeSharedSettingsWithLocalFallbackFromSettings } from '../src/runtime/settings';
 import { buildDebugHighlightSegments } from '../src/ui/debug-highlight';
+import { collectDynWriteConflictsForTest } from '../src/runtime/transaction';
+import { buildRunWarningFromCommitSummaryForTest } from '../src/runtime/pipeline';
+import { isSnapshotResolutionUnsafeForDestructiveWriteForTest } from '../src/runtime/floor-binding';
 
 function buildSampleSettings() {
   return EwSettingsSchema.parse({
@@ -146,11 +156,146 @@ function validateDebugHighlightSegmentation(): void {
   );
 }
 
+function buildDesiredEntry(
+  overrides: Partial<MergedWorldbookDesiredEntry> = {},
+): MergedWorldbookDesiredEntry {
+  const baseDynWrite = DynWriteConfigSchema.parse({});
+  return {
+    name: 'EW/Dyn/shared',
+    content: '- item',
+    enabled: false,
+    source_flow_id: 'flow_a',
+    source_flow_name: 'Flow A',
+    priority: 100,
+    flow_order: 0,
+    dyn_write: baseDynWrite,
+    ...overrides,
+  };
+}
+
+function buildRemoveEntry(
+  overrides: Partial<MergedWorldbookRemoveEntry> = {},
+): MergedWorldbookRemoveEntry {
+  return {
+    name: 'EW/Dyn/shared',
+    source_flow_id: 'flow_remove',
+    source_flow_name: 'Flow Remove',
+    priority: 80,
+    flow_order: 1,
+    ...overrides,
+  };
+}
+
+function validateDynConflictSemantics(): void {
+  const settings = EwSettingsSchema.parse({});
+
+  const overwriteConflict = collectDynWriteConflictsForTest(
+    new Map([
+      [
+        'EW/Dyn/shared',
+        [
+          buildDesiredEntry(),
+          buildDesiredEntry({
+            source_flow_id: 'flow_b',
+            source_flow_name: 'Flow B',
+            flow_order: 1,
+          }),
+        ],
+      ],
+    ]),
+    new Map(),
+    settings,
+  );
+  assert.equal(overwriteConflict.length, 1);
+  assert.equal(overwriteConflict[0].name, 'EW/Dyn/shared');
+
+  const addConflictFree = collectDynWriteConflictsForTest(
+    new Map([
+      [
+        'EW/Dyn/shared',
+        [
+          buildDesiredEntry({
+            dyn_write: {
+              ...DynWriteConfigSchema.parse({}),
+              mode: 'add',
+            },
+          }),
+          buildDesiredEntry({
+            source_flow_id: 'flow_b',
+            source_flow_name: 'Flow B',
+            flow_order: 1,
+            dyn_write: {
+              ...DynWriteConfigSchema.parse({}),
+              mode: 'add',
+            },
+          }),
+        ],
+      ],
+    ]),
+    new Map(),
+    settings,
+  );
+  assert.equal(addConflictFree.length, 0);
+
+  const removeConflict = collectDynWriteConflictsForTest(
+    new Map([['EW/Dyn/shared', [buildDesiredEntry()]]]),
+    new Map([['EW/Dyn/shared', [buildRemoveEntry()]]]),
+    settings,
+  );
+  assert.equal(removeConflict.length, 1);
+}
+
+function validateRunWarningSemantics(): void {
+  const warning = buildRunWarningFromCommitSummaryForTest(
+    CommitSummarySchema.parse({
+      target_worldbook_name: 'WB_Main',
+      dyn_entries_requested: 1,
+      dyn_entries_created: 0,
+      dyn_entries_updated: 0,
+      dyn_entries_removed: 0,
+      controller_entries_requested: 1,
+      controller_entries_updated: 1,
+      write_scope: 'controller_only',
+      worldbook_verified: true,
+      effective_change_count: 1,
+    }),
+  );
+  assert.equal(warning?.code, 'dyn_not_updated');
+
+  const noWarning = buildRunWarningFromCommitSummaryForTest(
+    CommitSummarySchema.parse({
+      target_worldbook_name: 'WB_Main',
+      dyn_entries_requested: 0,
+      controller_entries_updated: 1,
+      effective_change_count: 1,
+    }),
+  );
+  assert.equal(noWarning, null);
+}
+
+function validateSnapshotResolutionSafety(): void {
+  assert.equal(
+    isSnapshotResolutionUnsafeForDestructiveWriteForTest('latest_fallback'),
+    true,
+  );
+  assert.equal(
+    isSnapshotResolutionUnsafeForDestructiveWriteForTest('same_swipe_fallback'),
+    false,
+  );
+  assert.equal(
+    isSnapshotResolutionUnsafeForDestructiveWriteForTest('single_fallback'),
+    false,
+  );
+}
+
 function main(): void {
   validateSharedSettingsSanitization();
   validateExtensionBucketFallback();
   validateDebugRedaction();
   validateDebugHighlightSegmentation();
+  validateDynConflictSemantics();
+  validateRunWarningSemantics();
+  validateSnapshotResolutionSafety();
   console.log('validate:critical passed');
 }
 

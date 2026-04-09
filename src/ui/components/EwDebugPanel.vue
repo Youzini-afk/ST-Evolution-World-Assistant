@@ -192,6 +192,15 @@
           </div>
           <div v-if="commitHintText" class="dbg-commit-hint">{{ commitHintText }}</div>
         </div>
+        <div v-if="store.lastRun.warning" class="dbg-warning-card">
+          <div class="dbg-warning-card__header">
+            <strong>{{ store.lastRun.warning.summary }}</strong>
+            <span class="dbg-warning-pill">{{ formatWarningCode(store.lastRun.warning.code) }}</span>
+          </div>
+          <div v-if="store.lastRun.warning.detail" class="dbg-warning-detail">
+            {{ store.lastRun.warning.detail }}
+          </div>
+        </div>
         <div v-if="store.lastRun.failure" class="dbg-failure-card" :data-stage="store.lastRun.failure.stage">
           <div class="dbg-failure-card__header">
             <strong>{{ store.lastRun.failure.summary }}</strong>
@@ -428,6 +437,8 @@ function formatFailureKind(kind: string): string {
       return '响应状态异常';
     case 'no_effective_write':
       return '没有有效写入';
+    case 'snapshot_resolution_unsafe':
+      return '快照回退不安全';
     case 'http_error':
       return '接口请求失败';
     case 'auth_error':
@@ -464,6 +475,15 @@ function formatFailureKind(kind: string): string {
       return '已取消';
     default:
       return '未知错误';
+  }
+}
+
+function formatWarningCode(code: string): string {
+  switch (code) {
+    case 'dyn_not_updated':
+      return 'Dyn 未更新';
+    default:
+      return '运行警告';
   }
 }
 
@@ -822,6 +842,47 @@ function formatWriteScope(scope: string): string {
   font-size: 0.74rem;
   line-height: 1.5;
   color: #fde68a;
+}
+
+.dbg-warning-card {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 0.85rem;
+  border: 1px solid color-mix(in srgb, #f59e0b 28%, transparent);
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, #f59e0b 10%, transparent),
+    rgba(0, 0, 0, 0.08)
+  );
+}
+
+.dbg-warning-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dbg-warning-card__header strong {
+  color: color-mix(in srgb, var(--SmartThemeBodyColor) 92%, transparent);
+  font-size: 0.82rem;
+}
+
+.dbg-warning-pill {
+  padding: 0.16rem 0.55rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+  color: #fde68a;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.dbg-warning-detail {
+  margin-top: 0.55rem;
+  font-size: 0.74rem;
+  color: color-mix(in srgb, var(--SmartThemeBodyColor) 74%, transparent);
+  line-height: 1.55;
 }
 
 .dbg-run-time {

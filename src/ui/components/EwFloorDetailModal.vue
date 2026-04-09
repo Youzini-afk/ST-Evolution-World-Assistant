@@ -276,11 +276,11 @@ const resolutionSummary = computed(() => {
     case 'exact':
       return '当前可见版本已精确命中该楼快照。';
     case 'single_fallback':
-      return '当前版本未精确命中，但该楼仅有一个快照版本，因此直接展示该版本。';
+      return '当前版本未精确命中，但该楼仅有一个快照版本，因此直接展示该版本。允许用于受控写回。';
     case 'same_swipe_fallback':
-      return '当前版本未精确命中，已回退展示同一 swipe 下的快照版本。';
+      return '当前版本未精确命中，已回退展示同一 swipe 下的快照版本。允许用于受控写回。';
     case 'latest_fallback':
-      return '当前版本未精确命中，已回退展示该楼最近可用的快照版本。';
+      return '当前版本未精确命中，已回退展示该楼最近可用的快照版本。该来源只用于显示，默认不会参与危险写回。';
     case 'missing':
     default:
       return '当前楼没有可展示快照；可能是未执行、被跳过，或快照确实缺失。';

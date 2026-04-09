@@ -348,17 +348,17 @@ const resolutionMeta = {
   },
   single_fallback: {
     label: '单版回退',
-    title: '当前版本未命中，但该楼只有一个快照版本，因此直接展示该版本。',
+    title: '当前版本未命中，但该楼只有一个快照版本，因此直接展示该版本；允许用于受控写回。',
     tone: 'fallback',
   },
   same_swipe_fallback: {
     label: '同划回退',
-    title: '当前版本未精确命中，但命中了同一 swipe 的其他版本快照。',
+    title: '当前版本未精确命中，但命中了同一 swipe 的其他版本快照；允许用于受控写回。',
     tone: 'fallback',
   },
   latest_fallback: {
     label: '最新回退',
-    title: '当前版本未命中，历史面板已回退展示该楼最近可用的快照版本。',
+    title: '当前版本未命中，历史面板已回退展示该楼最近可用的快照版本；该来源只用于显示，默认不会参与危险写回。',
     tone: 'fallback',
   },
   missing: {

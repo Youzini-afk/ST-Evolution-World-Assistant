@@ -17,6 +17,7 @@ import {
   collectLatestSnapshots,
   rollbackToFloor,
   type FloorSnapshot,
+  type LatestSnapshotsResult,
 } from '../runtime/floor-binding';
 import { runWorkflow } from '../runtime/pipeline';
 import { previewPrompt, type PromptPreviewMessage } from '../runtime/prompt-assembler';
@@ -71,7 +72,7 @@ export const useEwStore = defineStore('evolution-world-store', () => {
 
   // ── 调试预览 ──
   const promptPreview = ref<PromptPreviewMessage[] | null>(null);
-  const snapshotPreview = ref<{ controllers: ControllerEntrySnapshot[]; dyn: Map<string, DynSnapshot> } | null>(null);
+  const snapshotPreview = ref<LatestSnapshotsResult | null>(null);
   const previewFlowId = ref<string>('');
 
   // ── 历史记录 ──
@@ -924,9 +925,18 @@ export const useEwStore = defineStore('evolution-world-store', () => {
       snapshotPreview.value = await collectLatestSnapshots();
       const dynCount = snapshotPreview.value.dyn.size;
       const controllerCount = snapshotPreview.value.controllers.length;
+      const resolutionLabelMap: Record<string, string> = {
+        exact: '精确命中',
+        single_fallback: '单版回退',
+        same_swipe_fallback: '同划回退',
+        latest_fallback: '最新回退',
+        missing: '缺失',
+      };
       showEwNotice({
         title: '调试',
-        message: `Controller: ${controllerCount} 条 | Dyn 条目: ${dynCount}`,
+        message:
+          `控制器：${controllerCount} 条 | Dyn 条目：${dynCount} 条 | ` +
+          `快照解析：${resolutionLabelMap[snapshotPreview.value.resolution] ?? snapshotPreview.value.resolution}`,
         level: 'success',
       });
     } catch (e) {

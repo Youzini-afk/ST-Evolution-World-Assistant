@@ -9,6 +9,7 @@ import {
   EwSettings,
   MergedPlan,
   MergedWorldbookDesiredEntry,
+  MergedWorldbookRemoveEntry,
 } from './types';
 import { createWorkflowRuntimeError } from './workflow-error';
 import {
@@ -186,6 +187,81 @@ function groupDesiredEntries(entries: MergedWorldbookDesiredEntry[]): Map<string
     grouped.set(entry.name, bucket);
   }
   return grouped;
+}
+
+type DynWriteConflict = {
+  name: string;
+  desired: MergedWorldbookDesiredEntry[];
+  removals: MergedWorldbookRemoveEntry[];
+};
+
+function groupRemoveEntries(entries: MergedWorldbookRemoveEntry[]): Map<string, MergedWorldbookRemoveEntry[]> {
+  const grouped = new Map<string, MergedWorldbookRemoveEntry[]>();
+  for (const entry of entries) {
+    const bucket = grouped.get(entry.name) ?? [];
+    bucket.push(entry);
+    grouped.set(entry.name, bucket);
+  }
+  return grouped;
+}
+
+function collectDynWriteConflicts(
+  groupedDesiredEntries: Map<string, MergedWorldbookDesiredEntry[]>,
+  groupedRemoveEntries: Map<string, MergedWorldbookRemoveEntry[]>,
+  settings: EwSettings,
+): DynWriteConflict[] {
+  const conflicts: DynWriteConflict[] = [];
+  const conflictNames = new Set<string>();
+
+  for (const [entryName, contributions] of groupedDesiredEntries.entries()) {
+    if (!entryName.startsWith(settings.dynamic_entry_prefix)) {
+      continue;
+    }
+
+    const removals = groupedRemoveEntries.get(entryName) ?? [];
+    const hasMultiWriterConflict =
+      contributions.length > 1 && !contributions.every(entry => entry.dyn_write.mode === 'add');
+    const hasWriteRemoveConflict = removals.length > 0;
+
+    if (!hasMultiWriterConflict && !hasWriteRemoveConflict) {
+      continue;
+    }
+
+    if (conflictNames.has(entryName)) {
+      continue;
+    }
+    conflictNames.add(entryName);
+    conflicts.push({
+      name: entryName,
+      desired: contributions,
+      removals,
+    });
+  }
+
+  return conflicts;
+}
+
+function describeDynWriteConflicts(conflicts: DynWriteConflict[]): string {
+  return conflicts
+    .map(conflict => {
+      const desired = conflict.desired.map(
+        entry =>
+          `${entry.source_flow_name}（${entry.source_flow_id}，写入模式=${entry.dyn_write.mode}）`,
+      );
+      const removals = conflict.removals.map(
+        entry => `${entry.source_flow_name}（${entry.source_flow_id}，删除条目）`,
+      );
+      return `${conflict.name}: ${[...desired, ...removals].join(' ; ')}`;
+    })
+    .join('\n');
+}
+
+export function collectDynWriteConflictsForTest(
+  groupedDesiredEntries: Map<string, MergedWorldbookDesiredEntry[]>,
+  groupedRemoveEntries: Map<string, MergedWorldbookRemoveEntry[]>,
+  settings: EwSettings,
+): DynWriteConflict[] {
+  return collectDynWriteConflicts(groupedDesiredEntries, groupedRemoveEntries, settings);
 }
 
 function materializeDynEntryContent(
@@ -372,9 +448,14 @@ export async function commitMergedPlan(
   const beforeEntries = target.entries;
   const chatId = getChatId();
   const requestedDynEntryCount = new Set(
-    mergedPlan.worldbook.desired_entries
-      .filter(entry => entry.name.startsWith(settings.dynamic_entry_prefix))
-      .map(entry => entry.name),
+    [
+      ...mergedPlan.worldbook.desired_entries
+        .filter(entry => entry.name.startsWith(settings.dynamic_entry_prefix))
+        .map(entry => entry.name),
+      ...mergedPlan.worldbook.remove_entries
+        .filter(entry => entry.name.startsWith(settings.dynamic_entry_prefix))
+        .map(entry => entry.name),
+    ],
   ).size;
   const requestedControllerEntryCount = new Set(controllerTemplates.map(slot => slot.entry_name)).size;
 
@@ -394,6 +475,21 @@ export async function commitMergedPlan(
     entry => !mergedPlan.worldbook.remove_entries.some(removal => removal.name === entry.name),
   );
   const desiredEntriesByName = groupDesiredEntries(mergedPlan.worldbook.desired_entries);
+  const removeEntriesByName = groupRemoveEntries(mergedPlan.worldbook.remove_entries);
+  const dynWriteConflicts = collectDynWriteConflicts(
+    desiredEntriesByName,
+    removeEntriesByName,
+    settings,
+  );
+  if (dynWriteConflicts.length > 0) {
+    throw createWorkflowRuntimeError('entry_conflict', 'commit', {
+      message: `检测到 ${dynWriteConflicts.length} 个动态条目在同一轮被竞争写入，已阻止本轮写回。`,
+      summary: '多个工作流同时竞争同名动态条目，已阻止本轮写回。',
+      detail: describeDynWriteConflicts(dynWriteConflicts),
+      conflict_entries: dynWriteConflicts.map(conflict => conflict.name),
+      target_worldbook_name: target.worldbook_name,
+    });
+  }
   const resolvedNonDynEntries: Array<{ name: string; content: string; enabled: boolean }> = [];
 
   for (const [entryName, contributions] of desiredEntriesByName.entries()) {

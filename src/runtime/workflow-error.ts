@@ -66,6 +66,8 @@ function defaultSummaryForCode(code: WorkflowFailureCode): string {
       return '工作流返回 status != ok，本轮执行已中止。';
     case 'no_effective_write':
       return '本轮执行没有产生任何有效写入或回复指令。';
+    case 'snapshot_resolution_unsafe':
+      return '当前只命中了不安全的历史回退快照，已阻止危险写回。';
     default:
       return '工作流执行失败。';
   }
@@ -85,7 +87,9 @@ export function getWorkflowFailureSuggestion(
     case 'response_status_not_ok':
       return '检查该工作流的响应状态、提示词约束和上游 API 返回内容。';
     case 'no_effective_write':
-      return '确认本轮至少产生 worldbook/controller 写入或 reply_instruction。';
+      return '确认本轮至少产生世界书写入、控制器写入，或有效的回复指令。';
+    case 'snapshot_resolution_unsafe':
+      return '请先切回能精确命中快照的消息版本，或使用同划回退/单版回退来源后再执行回滚、恢复或重推导。';
     default:
       break;
   }
@@ -98,7 +102,7 @@ export function getWorkflowFailureSuggestion(
     case 'commit':
       return '检查目标世界书绑定、世界书可读写性以及当前聊天上下文是否仍然有效。';
     case 'semantic':
-      return '检查模型返回是否满足约定语义，例如 status=ok 且 desired_entries.content 非空。';
+      return '检查模型返回是否满足约定语义，例如 status=ok 且动态条目内容非空。';
     case 'config':
       return '检查本地配置、模板和运行时依赖是否齐全。';
     default:

@@ -35,6 +35,7 @@ import {
 } from './snapshot-storage';
 import { ControllerEntrySnapshot, DynSnapshot, EwSettings } from './types';
 export type { DynSnapshot } from './types';
+import { createWorkflowRuntimeError } from './workflow-error';
 import {
   applyDynSnapshotToEntry,
   buildDynSnapshotFromEntry,
@@ -62,6 +63,16 @@ export type FloorSnapshotReadResolution =
   | 'same_swipe_fallback'
   | 'latest_fallback'
   | 'missing';
+
+export type LatestSnapshotsResult = {
+  controllers: ControllerEntrySnapshot[];
+  dyn: Map<string, DynSnapshot>;
+  resolution: FloorSnapshotReadResolution;
+  source: 'file' | 'inline' | 'none';
+  matched_version_key?: string;
+  file_name?: string;
+  message_id?: number;
+};
 
 type SnapshotReadMode = 'strict' | 'history';
 
@@ -132,6 +143,42 @@ function normalizeControllerSnapshot(snapshot: ControllerEntrySnapshot): Control
 
 function controllerSnapshotKey(snapshot: ControllerEntrySnapshot): string {
   return String(snapshot.flow_id ?? snapshot.entry_name ?? snapshot.flow_name ?? 'legacy');
+}
+
+function isSnapshotResolutionUnsafeForDestructiveWrite(
+  resolution: FloorSnapshotReadResolution | undefined,
+): boolean {
+  return resolution === 'latest_fallback';
+}
+
+function assertSnapshotResolutionSafeForDestructiveWrite(
+  resolution: FloorSnapshotReadResolution | undefined,
+  context: {
+    operation: string;
+    messageId?: number;
+    matchedVersionKey?: string;
+    fileName?: string;
+  },
+): void {
+  if (!isSnapshotResolutionUnsafeForDestructiveWrite(resolution)) {
+    return;
+  }
+
+  throw createWorkflowRuntimeError('snapshot_resolution_unsafe', 'commit', {
+    message: '当前仅命中最新回退快照，已阻止危险写回。',
+    summary: '当前只命中了最新回退快照，已阻止危险写回。',
+    detail:
+      `操作=${context.operation}；` +
+      `楼层=${context.messageId ?? -1}；` +
+      `匹配版本=${context.matchedVersionKey ?? '(none)'}；` +
+      `快照文件=${context.fileName ?? '(none)'}`,
+  });
+}
+
+export function isSnapshotResolutionUnsafeForDestructiveWriteForTest(
+  resolution: FloorSnapshotReadResolution | undefined,
+): boolean {
+  return isSnapshotResolutionUnsafeForDestructiveWrite(resolution);
 }
 
 const floorBindingListenerStops: StopFn[] = [];
@@ -1469,13 +1516,10 @@ export function getFloorEntryNames(messageId: number): string[] {
  * mixed-mode chats work correctly (e.g. user switched mode mid-chat).
  * The latest snapshot (by message position) wins.
  */
-export async function collectLatestSnapshots(): Promise<{
-  controllers: ControllerEntrySnapshot[];
-  dyn: Map<string, DynSnapshot>;
-}> {
+export async function collectLatestSnapshots(): Promise<LatestSnapshotsResult> {
   const lastId = getLastMessageId();
   if (lastId < 0) {
-    return { controllers: [], dyn: new Map() };
+    return { controllers: [], dyn: new Map(), resolution: 'missing', source: 'none' };
   }
 
   const allMessages = getChatMessages(`0-${lastId}`);
@@ -1497,10 +1541,15 @@ export async function collectLatestSnapshots(): Promise<{
     return {
       controllers: snapshot.controllers.map(normalizeControllerSnapshot).filter(e => e.content),
       dyn: dynMap,
+      resolution: readResult.resolution,
+      source: readResult.source,
+      matched_version_key: readResult.matched_version_key,
+      file_name: readResult.file_name,
+      message_id: msg.message_id,
     };
   }
 
-  return { controllers: [], dyn: new Map() };
+  return { controllers: [], dyn: new Map(), resolution: 'missing', source: 'none' };
 }
 
 // ── Unified Purge + Restore ─────────────────────────────────
@@ -1538,13 +1587,22 @@ export async function purgeAndRestoreForChat(settings: EwSettings): Promise<void
 
   // 安全检查：先收集快照。如果存在快照引用但当前可见版本找不到匹配快照，
   // 保持 worldbook 现状不动，避免因版本错配或文件缺失导致破坏性清除。
-  const { controllers: controllerSnapshots, dyn: dynSnapshots } = await collectLatestSnapshots();
+  const latestSnapshots = await collectLatestSnapshots();
+  const { controllers: controllerSnapshots, dyn: dynSnapshots } = latestSnapshots;
   if (dynSnapshots.size === 0 && controllerSnapshots.length === 0 && hasSnapshotRefs) {
     console.info(
       '[Evolution World] purgeAndRestore: no valid snapshots found for current visible versions, keeping current worldbook state',
     );
     refreshObservedMessageVersions();
     return;
+  }
+  if (dynSnapshots.size > 0 || controllerSnapshots.length > 0) {
+    assertSnapshotResolutionSafeForDestructiveWrite(latestSnapshots.resolution, {
+      operation: 'purge_and_restore',
+      messageId: latestSnapshots.message_id,
+      matchedVersionKey: latestSnapshots.matched_version_key,
+      fileName: latestSnapshots.file_name,
+    });
   }
 
   // Step 1: Remove all EW/Dyn/* entries and clear all EW/Controller/* entries.
@@ -1827,11 +1885,30 @@ export type SnapshotDiffApplyResult = {
 
 export async function applySnapshotDiffToCurrentWorldbook(
   settings: EwSettings,
-  previousSnapshot: SnapshotData | null,
-  nextSnapshot: SnapshotData | null,
+  previousSnapshotRead: FloorSnapshot | null,
+  nextSnapshotRead: FloorSnapshot | null,
 ): Promise<SnapshotDiffApplyResult> {
+  const previousSnapshot = previousSnapshotRead?.snapshot ?? null;
+  const nextSnapshot = nextSnapshotRead?.snapshot ?? null;
   if (!previousSnapshot && !nextSnapshot) {
     return { applied: 0, conflicts: 0, conflict_names: [] };
+  }
+
+  if (previousSnapshotRead?.snapshot) {
+    assertSnapshotResolutionSafeForDestructiveWrite(previousSnapshotRead.resolution, {
+      operation: 'apply_snapshot_diff:previous',
+      messageId: previousSnapshotRead.messageId,
+      matchedVersionKey: previousSnapshotRead.matched_version_key,
+      fileName: previousSnapshotRead.file_name,
+    });
+  }
+  if (nextSnapshotRead?.snapshot) {
+    assertSnapshotResolutionSafeForDestructiveWrite(nextSnapshotRead.resolution, {
+      operation: 'apply_snapshot_diff:next',
+      messageId: nextSnapshotRead.messageId,
+      matchedVersionKey: nextSnapshotRead.matched_version_key,
+      fileName: nextSnapshotRead.file_name,
+    });
   }
 
   const target = await resolveTargetWorldbook(settings);
@@ -2069,20 +2146,27 @@ async function restoreWorldbookFromSnapshots(
 
   // 在 predicate 范围内找到**最新**有快照的楼层，直接使用其完整状态。
   // 每个快照已是全量备份，跨楼层累加合并会导致被后续工作流删除的条目复活。
-  let latestSnapshot: SnapshotData | null = null;
+  let latestSnapshotFloor: FloorSnapshot | null = null;
   for (let i = allFloors.length - 1; i >= 0; i--) {
     const floor = allFloors[i];
     if (!predicate(floor)) continue;
     if (!floor.snapshot) continue;
-    latestSnapshot = floor.snapshot;
+    latestSnapshotFloor = floor;
     break;
   }
 
   // 核心安全防护：没有找到有效快照时，禁止破坏性写回
-  if (!latestSnapshot) {
+  if (!latestSnapshotFloor?.snapshot) {
     console.info('[EW] restoreWorldbookFromSnapshots: no matching snapshot found, skipping destructive restore');
     return;
   }
+  assertSnapshotResolutionSafeForDestructiveWrite(latestSnapshotFloor.resolution, {
+    operation: 'restore_from_snapshots',
+    messageId: latestSnapshotFloor.messageId,
+    matchedVersionKey: latestSnapshotFloor.matched_version_key,
+    fileName: latestSnapshotFloor.file_name,
+  });
+  const latestSnapshot = latestSnapshotFloor.snapshot;
 
   for (const snapshot of latestSnapshot.controllers.map(normalizeControllerSnapshot)) {
     controllers.set(controllerSnapshotKey(snapshot), snapshot);
