@@ -277,6 +277,9 @@ function buildCommitSummary(
   afterEntries: WbEntry[],
   settings: EwSettings,
   targetWorldbookName: string,
+  requestedDynEntryCount: number,
+  requestedControllerEntryCount: number,
+  worldbookVerified: boolean,
 ): CommitSummary {
   const beforeDyn = new Map(
     beforeEntries
@@ -333,12 +336,27 @@ function buildCommitSummary(
     }
   }
 
+  const hasDynChanges = dynEntriesCreated + dynEntriesUpdated + dynEntriesRemoved > 0;
+  const hasControllerChanges = controllerEntriesUpdated > 0;
+  let writeScope: CommitSummary['write_scope'] = 'none';
+  if (hasDynChanges && hasControllerChanges) {
+    writeScope = 'dyn_and_controller';
+  } else if (hasDynChanges) {
+    writeScope = 'dyn_only';
+  } else if (hasControllerChanges) {
+    writeScope = 'controller_only';
+  }
+
   return {
     target_worldbook_name: targetWorldbookName,
+    dyn_entries_requested: requestedDynEntryCount,
     dyn_entries_created: dynEntriesCreated,
     dyn_entries_updated: dynEntriesUpdated,
     dyn_entries_removed: dynEntriesRemoved,
+    controller_entries_requested: requestedControllerEntryCount,
     controller_entries_updated: controllerEntriesUpdated,
+    write_scope: writeScope,
+    worldbook_verified: worldbookVerified,
     effective_change_count: dynEntriesCreated + dynEntriesUpdated + dynEntriesRemoved + controllerEntriesUpdated,
   };
 }
@@ -353,6 +371,12 @@ export async function commitMergedPlan(
   const target = await resolveTargetWorldbook(settings);
   const beforeEntries = target.entries;
   const chatId = getChatId();
+  const requestedDynEntryCount = new Set(
+    mergedPlan.worldbook.desired_entries
+      .filter(entry => entry.name.startsWith(settings.dynamic_entry_prefix))
+      .map(entry => entry.name),
+  ).size;
+  const requestedControllerEntryCount = new Set(controllerTemplates.map(slot => slot.entry_name)).size;
 
   const allNames = [
     ...mergedPlan.worldbook.desired_entries.map(entry => entry.name),
@@ -401,35 +425,65 @@ export async function commitMergedPlan(
     }
   }
 
-  const desiredControllerByName = new Map(controllerTemplates.map(slot => [slot.entry_name, slot]));
+  if (controllerTemplates.length > 0) {
+    const desiredControllerByName = new Map(controllerTemplates.map(slot => [slot.entry_name, slot]));
 
-  for (const entry of nextEntries) {
-    if (!entry.name.startsWith(settings.controller_entry_prefix)) {
-      continue;
+    for (const entry of nextEntries) {
+      if (!entry.name.startsWith(settings.controller_entry_prefix)) {
+        continue;
+      }
+      const desiredController = desiredControllerByName.get(entry.name);
+      if (desiredController) {
+        entry.content = desiredController.content;
+        entry.enabled = true;
+      } else {
+        entry.content = '';
+        entry.enabled = false;
+      }
     }
-    const desiredController = desiredControllerByName.get(entry.name);
-    if (desiredController) {
-      entry.content = desiredController.content;
-      entry.enabled = true;
-    } else {
-      entry.content = '';
-      entry.enabled = false;
+
+    for (const slot of controllerTemplates) {
+      const ctrlExisting = nextEntries.find(entry => entry.name === slot.entry_name);
+      if (ctrlExisting) {
+        continue;
+      }
+      nextEntries.push(ensureDefaultEntry(slot.entry_name, slot.content, true, nextEntries, true));
     }
   }
 
-  for (const slot of controllerTemplates) {
-    const ctrlExisting = nextEntries.find(entry => entry.name === slot.entry_name);
-    if (ctrlExisting) {
-      continue;
-    }
-    nextEntries.push(ensureDefaultEntry(slot.entry_name, slot.content, true, nextEntries, true));
-  }
-
-  const commitSummary = buildCommitSummary(beforeEntries, nextEntries, settings, target.worldbook_name);
+  let worldbookVerified = false;
+  let commitSummary = buildCommitSummary(
+    beforeEntries,
+    nextEntries,
+    settings,
+    target.worldbook_name,
+    requestedDynEntryCount,
+    requestedControllerEntryCount,
+    worldbookVerified,
+  );
 
   if (commitSummary.effective_change_count > 0) {
     saveControllerBackup(chatId, target.worldbook_name, collectControllerBackupEntries(beforeEntries, settings));
-    await replaceWorldbook(target.worldbook_name, nextEntries, { render: 'debounced' });
+    try {
+      await replaceWorldbook(target.worldbook_name, nextEntries, { render: 'debounced' });
+    } catch (error) {
+      throw createWorkflowRuntimeError('commit_failed', 'commit', {
+        message: `写回目标世界书 "${target.worldbook_name}" 失败。`,
+        detail: error instanceof Error ? error.message : String(error),
+        target_worldbook_name: target.worldbook_name,
+        cause: error,
+      });
+    }
+    worldbookVerified = true;
+    commitSummary = buildCommitSummary(
+      beforeEntries,
+      nextEntries,
+      settings,
+      target.worldbook_name,
+      requestedDynEntryCount,
+      requestedControllerEntryCount,
+      worldbookVerified,
+    );
 
     if (settings.floor_binding_enabled && messageId >= 0) {
       const dynSnapshots = collectManagedDynSnapshots(nextEntries, settings);

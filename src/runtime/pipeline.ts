@@ -377,10 +377,14 @@ export async function runWorkflow(
     targetWorldbookName = commitResult.target_worldbook_name;
     commitSummary = {
       target_worldbook_name: commitResult.target_worldbook_name,
+      dyn_entries_requested: commitResult.dyn_entries_requested,
       dyn_entries_created: commitResult.dyn_entries_created,
       dyn_entries_updated: commitResult.dyn_entries_updated,
       dyn_entries_removed: commitResult.dyn_entries_removed,
+      controller_entries_requested: commitResult.controller_entries_requested,
       controller_entries_updated: commitResult.controller_entries_updated,
+      write_scope: commitResult.write_scope,
+      worldbook_verified: commitResult.worldbook_verified,
       effective_change_count: commitResult.effective_change_count,
     };
     throwIfWorkflowCancelled(input);

@@ -175,6 +175,23 @@
           聊天：{{ store.lastRun.chat_id }}
           <template v-if="lastRunChatMismatch"> · 当前不是这条记录所属聊天</template>
         </div>
+        <div v-if="currentCommitSummary" class="dbg-commit-card">
+          <div class="dbg-commit-card__header">
+            <strong>写回结果</strong>
+            <span class="dbg-commit-pill" :data-scope="currentCommitSummary.write_scope">
+              {{ formatWriteScope(currentCommitSummary.write_scope) }}
+            </span>
+          </div>
+          <div class="dbg-commit-grid">
+            <span>目标世界书：{{ currentCommitSummary.target_worldbook_name || '(none)' }}</span>
+            <span>Dyn 请求：{{ currentCommitSummary.dyn_entries_requested }}</span>
+            <span>Dyn 变化：{{ dynCommitChangeCount }}</span>
+            <span>Controller 请求：{{ currentCommitSummary.controller_entries_requested }}</span>
+            <span>Controller 变化：{{ currentCommitSummary.controller_entries_updated }}</span>
+            <span>写后核验：{{ currentCommitSummary.worldbook_verified ? '已通过' : '未执行' }}</span>
+          </div>
+          <div v-if="commitHintText" class="dbg-commit-hint">{{ commitHintText }}</div>
+        </div>
         <div v-if="store.lastRun.failure" class="dbg-failure-card" :data-stage="store.lastRun.failure.stage">
           <div class="dbg-failure-card__header">
             <strong>{{ store.lastRun.failure.summary }}</strong>
@@ -293,6 +310,28 @@ const dynEntries = computed(() => {
 });
 
 const controllerEntries = computed(() => store.snapshotPreview?.controllers ?? []);
+const currentCommitSummary = computed(() => store.lastRun?.commit ?? null);
+const dynCommitChangeCount = computed(() => {
+  const commit = currentCommitSummary.value;
+  if (!commit) return 0;
+  return commit.dyn_entries_created + commit.dyn_entries_updated + commit.dyn_entries_removed;
+});
+const commitHintText = computed(() => {
+  const commit = currentCommitSummary.value;
+  if (!commit) {
+    return '';
+  }
+
+  if (commit.write_scope === 'controller_only' && commit.dyn_entries_requested > 0) {
+    return `本轮请求了 ${commit.dyn_entries_requested} 个 Dyn 条目，但最终只有 Controller 仓库发生变化。请重点检查模型返回的 desired_entries 是否真的产生了新内容，或这些 Dyn 条目是否与当前世界书内容完全一致。`;
+  }
+
+  if (commit.write_scope === 'none' && commit.target_worldbook_name) {
+    return '本轮命中了目标世界书，但没有形成实际写回。';
+  }
+
+  return '';
+});
 const currentChatId = computed(() => getCurrentChatIdSafe());
 const lastRunChatMismatch = computed(() => {
   const chatId = store.lastRun?.chat_id?.trim();
@@ -425,6 +464,19 @@ function formatFailureKind(kind: string): string {
       return '已取消';
     default:
       return '未知错误';
+  }
+}
+
+function formatWriteScope(scope: string): string {
+  switch (scope) {
+    case 'dyn_only':
+      return '仅 Dyn 写回';
+    case 'controller_only':
+      return '仅 Controller 写回';
+    case 'dyn_and_controller':
+      return 'Dyn + Controller';
+    default:
+      return '无写回';
   }
 }
 
@@ -714,6 +766,62 @@ function formatFailureKind(kind: string): string {
   margin-top: 0.4rem;
   font-size: 0.73rem;
   color: color-mix(in srgb, var(--SmartThemeBodyColor) 55%, transparent);
+}
+
+.dbg-commit-card {
+  margin-top: 0.7rem;
+  padding: 0.75rem 0.8rem;
+  border-radius: 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor) 26%, transparent);
+  background: color-mix(in srgb, var(--SmartThemeQuoteColor) 8%, rgba(0, 0, 0, 0.12));
+}
+
+.dbg-commit-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.55rem;
+}
+
+.dbg-commit-pill {
+  padding: 0.16rem 0.55rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--SmartThemeQuoteColor) 20%, transparent);
+  color: color-mix(in srgb, var(--SmartThemeBodyColor) 90%, transparent);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.dbg-commit-pill[data-scope='dyn_only'] {
+  background: color-mix(in srgb, #3b82f6 20%, transparent);
+  color: #bfdbfe;
+}
+
+.dbg-commit-pill[data-scope='controller_only'] {
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+  color: #fde68a;
+}
+
+.dbg-commit-pill[data-scope='dyn_and_controller'] {
+  background: color-mix(in srgb, #22c55e 18%, transparent);
+  color: #bbf7d0;
+}
+
+.dbg-commit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.4rem 0.75rem;
+  font-size: 0.73rem;
+  color: color-mix(in srgb, var(--SmartThemeBodyColor) 78%, transparent);
+}
+
+.dbg-commit-hint {
+  margin-top: 0.55rem;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: #fde68a;
 }
 
 .dbg-run-time {

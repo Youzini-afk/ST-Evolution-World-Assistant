@@ -11,7 +11,7 @@
  * - 角色附加世界书存储在 world_info.charLore[].extraBooks 中,
  *   key 是角色文件名 (avatar),不是 character.data.extensions.world_additional。
  */
-import { getSTContext, getRequestHeaders } from '../../st-adapter';
+import { getSTContext, getRequestHeaders, type STContext } from '../../st-adapter';
 
 // ── 类型定义 ──────────────────────────────────────────
 
@@ -65,12 +65,28 @@ interface StWorldInfoData {
   [key: string]: any;
 }
 
+type WorldInfoPayload = unknown;
+
 function isWorldInfoData(value: unknown): value is StWorldInfoData {
   return Boolean(
     value &&
       typeof value === 'object' &&
       !Array.isArray(value) &&
       typeof (value as StWorldInfoData).entries === 'object',
+  );
+}
+
+function toWorldInfoData(payload: WorldInfoPayload, worldInfoName: string): StWorldInfoData {
+  if (isWorldInfoData(payload)) {
+    return payload;
+  }
+
+  if (Array.isArray(payload)) {
+    return { entries: arrayToStEntries(payload as WbEntry[]) };
+  }
+
+  throw new Error(
+    `[Compat] ${worldInfoName} received invalid worldinfo payload`,
   );
 }
 
@@ -279,6 +295,70 @@ function arrayToStEntries(entries: WbEntry[]): Record<number, any> {
   return result;
 }
 
+function canonicalizeEntries(entries: WbEntry[]): WbEntry[] {
+  return stEntriesToArray(arrayToStEntries(entries)).sort((left, right) => {
+    if (left.uid !== right.uid) {
+      return left.uid - right.uid;
+    }
+    return String(left.name ?? '').localeCompare(String(right.name ?? ''));
+  });
+}
+
+async function fetchWorldInfoPayload(name: string): Promise<WorldInfoPayload> {
+  const headers = getRequestHeaders();
+  const response = await fetch('/api/worldinfo/get', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name }),
+  });
+  if (!response.ok) {
+    throw new Error(`[Compat] getWorldbook('${name}') failed: ${response.status}`);
+  }
+  return await response.json();
+}
+
+async function loadWorldInfoPayload(name: string): Promise<WorldInfoPayload> {
+  const ctx = getSTContext() as STContext;
+  if (typeof ctx.loadWorldInfo === 'function') {
+    try {
+      return await ctx.loadWorldInfo(name);
+    } catch (error) {
+      console.debug(`[Compat] loadWorldInfo('${name}') failed, falling back to backend fetch:`, error);
+    }
+  }
+
+  return await fetchWorldInfoPayload(name);
+}
+
+async function saveWorldInfoPayload(name: string, data: StWorldInfoData): Promise<void> {
+  const ctx = getSTContext() as STContext;
+  if (typeof ctx.saveWorldInfo === 'function') {
+    await ctx.saveWorldInfo(name, data, true);
+    return;
+  }
+
+  const headers = getRequestHeaders();
+  const response = await fetch('/api/worldinfo/edit', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name, data }),
+  });
+  if (!response.ok) {
+    throw new Error(`[Compat] replaceWorldbook('${name}') failed: ${response.status}`);
+  }
+}
+
+async function verifyWorldInfoPersistence(name: string, expectedEntries: WbEntry[]): Promise<void> {
+  const persisted = await fetchWorldInfoPayload(name);
+  const persistedData = toWorldInfoData(persisted, `replaceWorldbook('${name}')`);
+  const expectedComparable = canonicalizeEntries(expectedEntries);
+  const persistedComparable = canonicalizeEntries(stEntriesToArray(persistedData.entries));
+
+  if (!_.isEqual(expectedComparable, persistedComparable)) {
+    throw new Error(`[Compat] replaceWorldbook('${name}') verification failed: persisted entries differ from expected state`);
+  }
+}
+
 // ── 世界书 CRUD ──────────────────────────────────────
 
 /**
@@ -289,16 +369,8 @@ function arrayToStEntries(entries: WbEntry[]): Record<number, any> {
  * 此函数将 keyed entries 转化为 WbEntry[]。
  */
 export async function getWorldbook(name: string): Promise<WbEntry[]> {
-  const headers = getRequestHeaders();
-  const response = await fetch('/api/worldinfo/get', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ name }),
-  });
-  if (!response.ok) {
-    throw new Error(`[Compat] getWorldbook('${name}') failed: ${response.status}`);
-  }
-  const data: StWorldInfoData = await response.json();
+  const payload = await loadWorldInfoPayload(name);
+  const data = toWorldInfoData(payload, `getWorldbook('${name}')`);
 
   // ST 返回完整 data 对象,entries 是 keyed object
   if (data && typeof data.entries === 'object' && !Array.isArray(data.entries)) {
@@ -326,49 +398,25 @@ export async function replaceWorldbook(
   entries: WbEntry[],
   opts?: { render?: 'debounced' | 'immediate' | 'none' },
 ): Promise<void> {
-  const headers = getRequestHeaders();
-
   // 先读取现有 data,保留非 entries 的元数据
-  const getResponse = await fetch('/api/worldinfo/get', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ name }),
-  });
-  if (!getResponse.ok) {
-    throw new Error(
-      `[Compat] replaceWorldbook('${name}') pre-read failed: ${getResponse.status}`,
-    );
-  }
-  const existing = await getResponse.json();
-  let baseData: StWorldInfoData;
-  if (isWorldInfoData(existing)) {
-    baseData = existing;
-  } else if (Array.isArray(existing)) {
-    baseData = { entries: arrayToStEntries(existing as WbEntry[]) };
-  } else {
-    throw new Error(
-      `[Compat] replaceWorldbook('${name}') received invalid worldinfo payload`,
-    );
-  }
+  const existing = await loadWorldInfoPayload(name);
+  const baseData = toWorldInfoData(existing, `replaceWorldbook('${name}') pre-read`);
 
   // 用新的 entries 覆盖
   baseData.entries = arrayToStEntries(entries);
 
-  const response = await fetch('/api/worldinfo/edit', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ name, data: baseData }),
-  });
-  if (!response.ok) {
-    throw new Error(`[Compat] replaceWorldbook('${name}') failed: ${response.status}`);
-  }
+  await saveWorldInfoPayload(name, baseData);
+  await verifyWorldInfoPersistence(name, entries);
 
   // 如果需要更新 WI 编辑器
   if (opts?.render !== 'none') {
     try {
-      const ctx = getSTContext() as any;
+      const ctx = getSTContext() as STContext;
+      if (typeof ctx.updateWorldInfoList === 'function') {
+        await ctx.updateWorldInfoList();
+      }
       if (typeof ctx.reloadWorldInfoEditor === 'function') {
-        ctx.reloadWorldInfoEditor();
+        await ctx.reloadWorldInfoEditor();
       }
     } catch { /* 静默失败 */ }
   }
@@ -382,19 +430,12 @@ export async function replaceWorldbook(
  * 创建 `{ entries: {} }` 模板 → saveWorldInfo → 持久化。
  */
 export async function createWorldbook(name: string, entries: WbEntry[] = []): Promise<void> {
-  const headers = getRequestHeaders();
   const data: StWorldInfoData = {
     entries: entries.length > 0 ? arrayToStEntries(entries) : {},
   };
 
-  const response = await fetch('/api/worldinfo/edit', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ name, data }),
-  });
-  if (!response.ok) {
-    throw new Error(`[Compat] createWorldbook('${name}') failed: ${response.status}`);
-  }
+  await saveWorldInfoPayload(name, data);
+  await verifyWorldInfoPersistence(name, entries);
 }
 
 // ── 角色世界书绑定 ──────────────────────────────────

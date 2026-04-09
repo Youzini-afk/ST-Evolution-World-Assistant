@@ -36,6 +36,14 @@ export interface STContext {
   saveChat?: () => Promise<void>;
   saveChatConditional?: () => Promise<void>;
   deleteLastMessage?: () => Promise<void>;
+  loadWorldInfo?: (name: string) => Promise<Record<string, any>>;
+  saveWorldInfo?: (
+    name: string,
+    data: Record<string, any>,
+    immediately?: boolean,
+  ) => Promise<void>;
+  reloadWorldInfoEditor?: () => Promise<void> | void;
+  updateWorldInfoList?: () => Promise<void> | void;
   setExtensionPrompt?: (
     key: string,
     value: string,

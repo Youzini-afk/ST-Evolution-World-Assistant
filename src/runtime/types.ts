@@ -520,10 +520,16 @@ export const WorkflowFailureSchema = z.preprocess(
 
 export const CommitSummarySchema = z.object({
   target_worldbook_name: z.string().default(''),
+  dyn_entries_requested: z.coerce.number().int().min(0).default(0),
   dyn_entries_created: z.coerce.number().int().min(0).default(0),
   dyn_entries_updated: z.coerce.number().int().min(0).default(0),
   dyn_entries_removed: z.coerce.number().int().min(0).default(0),
+  controller_entries_requested: z.coerce.number().int().min(0).default(0),
   controller_entries_updated: z.coerce.number().int().min(0).default(0),
+  write_scope: z
+    .enum(['none', 'dyn_only', 'controller_only', 'dyn_and_controller'])
+    .default('none'),
+  worldbook_verified: z.boolean().default(false),
   effective_change_count: z.coerce.number().int().min(0).default(0),
 });
 
