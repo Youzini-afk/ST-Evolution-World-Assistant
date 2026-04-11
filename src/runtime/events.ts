@@ -57,10 +57,14 @@ import {
   clearAfterReplyPending,
   clearAfterReplyPendingIfMatches,
   clearBeforeReplyBindingPending,
+  clearDryRunPromptPreview,
   clearSendContext,
   clearSendContextIfMatches,
+  consumeDryRunPromptPreview,
   markBeforeReplyBindingMigrated,
+  markDryRunPromptPreview,
   getRuntimeState,
+  isMvuExtraAnalysisGuardActive,
   pruneExpiredBeforeReplyBindingPending,
   isQuietLike,
   markAfterReplyHandled,
@@ -353,6 +357,16 @@ function registerGenerationAfterCommands(
 ): StopFn {
   const eventTypes = getEventTypes();
   return onSTEventFirst(eventTypes.GENERATION_AFTER_COMMANDS, handler);
+}
+
+function registerBeforeCombinePrompts(
+  handler: (promptData?: Record<string, any>) => Promise<void> | void,
+): StopFn {
+  const eventTypes = getEventTypes();
+  const eventName =
+    eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS ??
+    "generate_before_combine_prompts";
+  return onSTEventFirst(eventName, handler);
 }
 
 function getSendTextareaValue(): string {
@@ -3009,6 +3023,23 @@ function uninstallPrimaryGenerateInterceptor(): void {
 // Fallback path: GENERATION_AFTER_COMMANDS event
 // ---------------------------------------------------------------------------
 
+async function onBeforeCombinePrompts(
+  _promptData?: Record<string, any>,
+): Promise<void> {
+  if (consumeDryRunPromptPreview()) {
+    console.debug(
+      "[Evolution World] GENERATE_BEFORE_COMBINE_PROMPTS skipped: dry-run prompt preview bridge active",
+    );
+    return;
+  }
+
+  if (isMvuExtraAnalysisGuardActive()) {
+    console.debug(
+      "[Evolution World] GENERATE_BEFORE_COMBINE_PROMPTS observed during MVU extra analysis",
+    );
+  }
+}
+
 async function onGenerationAfterCommands(
   type: string,
   params: {
@@ -3019,6 +3050,24 @@ async function onGenerationAfterCommands(
   },
   dryRun: boolean,
 ) {
+  if (dryRun) {
+    return;
+  }
+
+  if (consumeDryRunPromptPreview()) {
+    console.debug(
+      "[Evolution World] GENERATION_AFTER_COMMANDS skipped: dry-run prompt preview bridge active",
+    );
+    return;
+  }
+
+  if (isMvuExtraAnalysisGuardActive()) {
+    console.debug(
+      "[Evolution World] GENERATION_AFTER_COMMANDS skipped: MVU extra analysis guard active",
+    );
+    return;
+  }
+
   // Dedup check 1: already handled by TavernHelper hook
   if (params?._ew_processed) {
     console.debug(
@@ -3922,7 +3971,13 @@ export function initRuntimeEvents() {
       onSTEvent(
         eventTypes.GENERATION_STARTED,
         (type: string, params: Record<string, any>, dryRun: boolean) => {
-          recordGeneration(type, params ?? {}, dryRun);
+          if (dryRun) {
+            markDryRunPromptPreview();
+            return;
+          }
+
+          clearDryRunPromptPreview();
+          recordGeneration(type, params ?? {}, false);
         },
       ),
     );
@@ -3946,6 +4001,12 @@ export function initRuntimeEvents() {
     );
 
     // Primary path: GENERATION_AFTER_COMMANDS (ST 扩展中不再需要 TavernHelper hook)
+    listenerStops.push(
+      registerBeforeCombinePrompts(async (promptData) => {
+        await onBeforeCombinePrompts(promptData);
+      }),
+    );
+
     listenerStops.push(
       registerGenerationAfterCommands(async (type, params, dryRun) => {
         await onGenerationAfterCommands(type, params ?? {}, dryRun);

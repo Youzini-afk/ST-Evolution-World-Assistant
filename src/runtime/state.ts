@@ -1,6 +1,9 @@
 ﻿import { now, simpleHash } from './helpers';
 import { EwSettings } from './types';
 
+const DRY_RUN_PROMPT_PREVIEW_BRIDGE_MS = 1200;
+const MVU_EXTRA_ANALYSIS_GUARD_TTL_MS = 2500;
+
 type SendRecord = {
   message_id: number;
   user_input: string;
@@ -77,6 +80,8 @@ const state: RuntimeState = {
 };
 
 let generationSeq = 0;
+let dryRunPromptPreviewUntil = 0;
+let mvuExtraAnalysisGuardUntil = 0;
 
 export function getRuntimeState(): RuntimeState {
   return state;
@@ -118,6 +123,111 @@ export function recordGeneration(type: string, params: Record<string, any> | und
   if (!state.after_reply.pending_at) {
     state.after_reply.pending_at = now();
   }
+}
+
+export function markDryRunPromptPreview(
+  ttl_ms = DRY_RUN_PROMPT_PREVIEW_BRIDGE_MS,
+): number {
+  const resolvedTtlMs = Math.max(
+    100,
+    Math.floor(Number(ttl_ms) || DRY_RUN_PROMPT_PREVIEW_BRIDGE_MS),
+  );
+  dryRunPromptPreviewUntil = now() + resolvedTtlMs;
+  return dryRunPromptPreviewUntil;
+}
+
+export function clearDryRunPromptPreview(currentAt = now()): boolean {
+  const hadPendingSkip = dryRunPromptPreviewUntil > currentAt;
+  dryRunPromptPreviewUntil = 0;
+  return hadPendingSkip;
+}
+
+export function consumeDryRunPromptPreview(currentAt = now()): boolean {
+  if (dryRunPromptPreviewUntil <= currentAt) {
+    if (dryRunPromptPreviewUntil !== 0) {
+      dryRunPromptPreviewUntil = 0;
+    }
+    return false;
+  }
+
+  dryRunPromptPreviewUntil = 0;
+  return true;
+}
+
+export function readMvuExtraAnalysisFlag(): boolean {
+  const runtime = globalThis as typeof globalThis & {
+    Mvu?: { isDuringExtraAnalysis?: () => boolean };
+    window?: {
+      Mvu?: { isDuringExtraAnalysis?: () => boolean };
+      parent?: {
+        Mvu?: { isDuringExtraAnalysis?: () => boolean };
+        getActivePinia?: () => any;
+      };
+      getActivePinia?: () => any;
+    };
+    getActivePinia?: () => any;
+  };
+
+  try {
+    if (typeof runtime.Mvu?.isDuringExtraAnalysis === 'function') {
+      return Boolean(runtime.Mvu.isDuringExtraAnalysis());
+    }
+  } catch {
+    // ignore guard read failures and fall through
+  }
+
+  try {
+    if (typeof runtime.window?.Mvu?.isDuringExtraAnalysis === 'function') {
+      return Boolean(runtime.window.Mvu.isDuringExtraAnalysis());
+    }
+  } catch {
+    // ignore guard read failures and fall through
+  }
+
+  try {
+    if (
+      typeof runtime.window?.parent?.Mvu?.isDuringExtraAnalysis === 'function'
+    ) {
+      return Boolean(runtime.window.parent.Mvu.isDuringExtraAnalysis());
+    }
+  } catch {
+    // ignore guard read failures and fall through
+  }
+
+  try {
+    const getActivePinia =
+      runtime.getActivePinia ??
+      runtime.window?.getActivePinia ??
+      runtime.window?.parent?.getActivePinia;
+    if (typeof getActivePinia === 'function') {
+      const pinia = getActivePinia();
+      return Boolean(
+        pinia?.state?.value?.['MVU变量框架']?.runtimes?.is_during_extra_analysis,
+      );
+    }
+  } catch {
+    // ignore guard read failures and fall through
+  }
+
+  return false;
+}
+
+export function isMvuExtraAnalysisGuardActive(currentAt = now()): boolean {
+  if (readMvuExtraAnalysisFlag()) {
+    mvuExtraAnalysisGuardUntil = Math.max(
+      mvuExtraAnalysisGuardUntil,
+      currentAt + MVU_EXTRA_ANALYSIS_GUARD_TTL_MS,
+    );
+  }
+
+  if (mvuExtraAnalysisGuardUntil <= currentAt) {
+    if (mvuExtraAnalysisGuardUntil !== 0) {
+      mvuExtraAnalysisGuardUntil = 0;
+    }
+    return false;
+  }
+
+  return true;
 }
 
 export function setProcessing(processing: boolean) {
@@ -242,6 +352,8 @@ export function resetRuntimeState() {
   state.last_send_intent = null;
   state.last_generation = null;
   generationSeq = 0;
+  dryRunPromptPreviewUntil = 0;
+  mvuExtraAnalysisGuardUntil = 0;
   clearAfterReplyPending();
   clearBeforeReplyBindingPending();
   state.after_reply.last_handled_assistant_message_id = null;

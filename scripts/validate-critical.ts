@@ -23,6 +23,14 @@ import { buildRunWarningFromCommitSummaryForTest } from '../src/runtime/pipeline
 import { isSnapshotResolutionUnsafeForDestructiveWriteForTest } from '../src/runtime/floor-binding';
 import { applyLocalWorkflowRegexForTest, applyTavernRegexFallbackForTest } from '../src/runtime/regex-engine';
 import { buildStructuredOutputRequestAugment } from '../src/runtime/structured-output';
+import {
+  clearDryRunPromptPreview,
+  consumeDryRunPromptPreview,
+  isMvuExtraAnalysisGuardActive,
+  markDryRunPromptPreview,
+  readMvuExtraAnalysisFlag,
+  resetRuntimeState,
+} from '../src/runtime/state';
 
 function buildSampleSettings() {
   return EwSettingsSchema.parse({
@@ -371,6 +379,57 @@ function validateWorkflowRegexPipeline(): void {
   assert.equal(worldInfoLocalRegex.appliedCount, 1);
 }
 
+function validateRuntimeTriggerGuards(): void {
+  resetRuntimeState();
+  assert.equal(consumeDryRunPromptPreview(), false);
+
+  markDryRunPromptPreview(600);
+  assert.equal(clearDryRunPromptPreview(), true);
+  assert.equal(consumeDryRunPromptPreview(), false);
+
+  markDryRunPromptPreview(600);
+  assert.equal(consumeDryRunPromptPreview(), true);
+  assert.equal(consumeDryRunPromptPreview(), false);
+
+  const runtime = globalThis as typeof globalThis & {
+    Mvu?: { isDuringExtraAnalysis?: () => boolean };
+    window?: any;
+    getActivePinia?: () => any;
+  };
+  const previousMvu = runtime.Mvu;
+  const previousWindow = runtime.window;
+  const previousGetActivePinia = runtime.getActivePinia;
+
+  try {
+    runtime.Mvu = undefined;
+    runtime.getActivePinia = undefined;
+    runtime.window = {
+      Mvu: {
+        isDuringExtraAnalysis: () => true,
+      },
+      parent: {},
+    };
+
+    assert.equal(readMvuExtraAnalysisFlag(), true);
+    assert.equal(isMvuExtraAnalysisGuardActive(1000), true);
+
+    runtime.window = {
+      Mvu: {
+        isDuringExtraAnalysis: () => false,
+      },
+      parent: {},
+    };
+
+    assert.equal(isMvuExtraAnalysisGuardActive(1200), true);
+    assert.equal(isMvuExtraAnalysisGuardActive(4000), false);
+  } finally {
+    runtime.Mvu = previousMvu;
+    runtime.window = previousWindow;
+    runtime.getActivePinia = previousGetActivePinia;
+    resetRuntimeState();
+  }
+}
+
 function main(): void {
   validateSharedSettingsSanitization();
   validateExtensionBucketFallback();
@@ -381,6 +440,7 @@ function main(): void {
   validateSnapshotResolutionSafety();
   validateStructuredOutputAugment();
   validateWorkflowRegexPipeline();
+  validateRuntimeTriggerGuards();
   console.log('validate:critical passed');
 }
 

@@ -35,6 +35,7 @@ import {
 } from './snapshot-storage';
 import { ControllerEntrySnapshot, DynSnapshot, EwSettings } from './types';
 export type { DynSnapshot } from './types';
+import { isMvuExtraAnalysisGuardActive } from './state';
 import { createWorkflowRuntimeError } from './workflow-error';
 import {
   applyDynSnapshotToEntry,
@@ -248,6 +249,17 @@ function shouldReactToVisibleVersionMutation(messageId: number): boolean {
   const prevVersionKey = observedMessageVersionKeys.get(messageId);
   observedMessageVersionKeys.set(messageId, nextVersionKey);
   return prevVersionKey !== nextVersionKey;
+}
+
+function shouldSkipRestoreForMvuExtraAnalysis(hookName: string): boolean {
+  if (!isMvuExtraAnalysisGuardActive()) {
+    return false;
+  }
+
+  console.debug(
+    `[Evolution World] floor binding restore skipped: MVU extra analysis guard active (${hookName})`,
+  );
+  return true;
 }
 
 function hasSnapshotMetadataHints(msg: any): boolean {
@@ -2277,6 +2289,10 @@ export function initFloorBindingEvents(getSettings: () => EwSettings): void {
 
   floorBindingListenerStops.push(
     onEvent(EVENT_MESSAGE_EDITED(), messageId => {
+      if (shouldSkipRestoreForMvuExtraAnalysis('MESSAGE_EDITED')) {
+        return;
+      }
+
       const currentSettings = getSettings();
       if (
         currentSettings.enabled &&
@@ -2290,6 +2306,10 @@ export function initFloorBindingEvents(getSettings: () => EwSettings): void {
 
   floorBindingListenerStops.push(
     onEvent(EVENT_MESSAGE_UPDATED(), messageId => {
+      if (shouldSkipRestoreForMvuExtraAnalysis('MESSAGE_UPDATED')) {
+        return;
+      }
+
       const currentSettings = getSettings();
       if (
         currentSettings.enabled &&
