@@ -42,6 +42,15 @@ export const EwFlowBehaviorOptionsSchema = z.object({
 const DynSecondaryLogicSchema = z.enum(['and_any', 'and_all', 'not_any', 'not_all']);
 const DynPositionRoleSchema = z.enum(['system', 'user', 'assistant']);
 const DynScanDepthSchema = z.union([z.literal('same_as_global'), z.coerce.number().int().min(0), z.string().min(1)]);
+const RegexRuleDepthSchema = z.preprocess(
+  value => {
+    if (value === '' || value === undefined) {
+      return null;
+    }
+    return value;
+  },
+  z.coerce.number().int().nullable(),
+);
 
 const DEFAULT_DYN_POSITION = {
   type: 'before_character_definition',
@@ -317,6 +326,41 @@ export const EwFlowPromptItemSchema = z.object({
   content: z.string().default(''),
 });
 
+const EwFlowCustomRegexRuleSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().default(''),
+  enabled: z.boolean().default(true),
+  find_regex: z.string().default(''),
+  replace_string: z.string().default(''),
+  trim_strings: z.union([z.array(z.string()), z.string()]).default([]),
+  promptOnly: z.boolean().default(false),
+  markdownOnly: z.boolean().default(false),
+  source: z
+    .object({
+      user_input: z.boolean().default(true),
+      ai_output: z.boolean().default(true),
+      world_info: z.boolean().default(false),
+      reasoning: z.boolean().default(false),
+    })
+    .default({
+      user_input: true,
+      ai_output: true,
+      world_info: false,
+      reasoning: false,
+    }),
+  destination: z
+    .object({
+      prompt: z.boolean().default(true),
+      display: z.boolean().default(false),
+    })
+    .default({
+      prompt: true,
+      display: false,
+    }),
+  min_depth: RegexRuleDepthSchema.default(null),
+  max_depth: RegexRuleDepthSchema.default(null),
+});
+
 export const EwFlowConfigSchema = z.object({
   id: z.string().min(1),
   name: z.string().default('Flow'),
@@ -338,17 +382,7 @@ export const EwFlowConfigSchema = z.object({
   extract_rules: z.array(TextSliceRuleSchema).default([]),
   exclude_rules: z.array(TextSliceRuleSchema).default([]),
   use_tavern_regex: z.boolean().default(false),
-  custom_regex_rules: z
-    .array(
-      z.object({
-        id: z.string().min(1),
-        name: z.string().default(''),
-        enabled: z.boolean().default(true),
-        find_regex: z.string().default(''),
-        replace_string: z.string().default(''),
-      }),
-    )
-    .default([]),
+  custom_regex_rules: z.array(EwFlowCustomRegexRuleSchema).default([]),
   request_template: z.string().default(''),
   response_extract_regex: z.string().default(''),
   response_remove_regex: z.string().default(''),

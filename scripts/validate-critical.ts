@@ -21,6 +21,7 @@ import { buildDebugHighlightSegments } from '../src/ui/debug-highlight';
 import { collectDynWriteConflictsForTest } from '../src/runtime/transaction';
 import { buildRunWarningFromCommitSummaryForTest } from '../src/runtime/pipeline';
 import { isSnapshotResolutionUnsafeForDestructiveWriteForTest } from '../src/runtime/floor-binding';
+import { applyLocalWorkflowRegexForTest, applyTavernRegexFallbackForTest } from '../src/runtime/regex-engine';
 import { buildStructuredOutputRequestAugment } from '../src/runtime/structured-output';
 
 function buildSampleSettings() {
@@ -312,6 +313,64 @@ function validateStructuredOutputAugment(): void {
   assert.equal(offAugment.transportMode, 'off');
 }
 
+function validateWorkflowRegexPipeline(): void {
+  const localRegex = applyLocalWorkflowRegexForTest(
+    'Alpha Beta',
+    [
+      {
+        id: 'local_1',
+        find_regex: '/Beta/g',
+        replace_string: 'Gamma',
+      },
+    ],
+    'ai_output',
+    'assistant',
+  );
+  assert.equal(localRegex.text, 'Alpha Gamma');
+  assert.equal(localRegex.appliedCount, 1);
+
+  const displayOnlyFallback = applyTavernRegexFallbackForTest(
+    'Alpha Beta',
+    [
+      {
+        id: 'display_only',
+        findRegex: '/Alpha/g',
+        replaceString: '<span>Promptless</span>',
+        destination: {
+          prompt: false,
+          display: true,
+        },
+      },
+    ],
+    'user_input',
+    'user',
+  );
+  assert.equal(displayOnlyFallback.text, 'Alpha Beta');
+  assert.equal(displayOnlyFallback.appliedCount, 0);
+  assert.equal(displayOnlyFallback.skippedDisplayOnlyRuleCount, 1);
+
+  const worldInfoLocalRegex = applyLocalWorkflowRegexForTest(
+    '秘密摘要',
+    [
+      {
+        id: 'local_world_info',
+        find_regex: '/秘密/g',
+        replace_string: '公开',
+        source: {
+          user_input: false,
+          ai_output: false,
+          world_info: true,
+          reasoning: false,
+        },
+      },
+    ],
+    'world_info',
+    'system',
+  );
+  assert.equal(worldInfoLocalRegex.text, '公开摘要');
+  assert.equal(worldInfoLocalRegex.appliedCount, 1);
+}
+
 function main(): void {
   validateSharedSettingsSanitization();
   validateExtensionBucketFallback();
@@ -321,6 +380,7 @@ function main(): void {
   validateRunWarningSemantics();
   validateSnapshotResolutionSafety();
   validateStructuredOutputAugment();
+  validateWorkflowRegexPipeline();
   console.log('validate:critical passed');
 }
 

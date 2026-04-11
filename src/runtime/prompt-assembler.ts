@@ -2,7 +2,7 @@ import { getHostRuntime as getStHostRuntime, tryGetSTContext } from '../st-adapt
 import { renderEjsContent } from './ejs-internal';
 import { isEwHiddenMessageIndex } from './hide-engine';
 import { isLikelyMvuWorldInfoContent, stripBlockedPromptContents, stripMvuPromptArtifacts } from './mvu-compat';
-import { applyTavernRegex } from './regex-engine';
+import { applyWorkflowPromptRegex, describeWorkflowRegexSummary } from './regex-engine';
 import type { ContextCursor, EwFlowConfig, EwPromptOrderEntry, EwSettings } from './types';
 import { collectIgnoredWorldInfoContents, resolveWorldInfo, type ResolvedWiEntry } from './worldinfo-engine';
 
@@ -1053,15 +1053,34 @@ export async function collectPromptComponents(
   }
 
   // ── 5. 正则处理 ─────────────────────────────────────────────────────
-  // 当 flow 启用 use_tavern_regex 时，对聊天消息应用酒馆的正则脚本
-  // （预设 + 全局 + 角色卡局部，跳过 markdownOnly）
-  if (flow.use_tavern_regex && components.chatMessages.length > 0) {
-    applyTavernRegex(components.chatMessages);
+  // 统一走工作流正则链：宿主 Tavern regex + flow 本地 custom_regex_rules。
+  if (
+    (flow.use_tavern_regex || flow.custom_regex_rules.length > 0) &&
+    (components.chatMessages.length > 0 || components.worldInfoBefore.length > 0 || components.worldInfoAfter.length > 0)
+  ) {
+    const regexSummary = applyWorkflowPromptRegex(flow, {
+      chatMessages: components.chatMessages,
+      worldInfoBefore: components.worldInfoBefore,
+      worldInfoAfter: components.worldInfoAfter,
+    });
+    const regexSummaryText = describeWorkflowRegexSummary(regexSummary);
+
     if (components.diagnostics.chatHistory) {
-      components.diagnostics.chatHistory.regex_applied = true;
+      components.diagnostics.chatHistory.regex_applied = regexSummary.chatMessagesChanged > 0;
       components.diagnostics.chatHistory.note = components.diagnostics.chatHistory.note
-        ? `${components.diagnostics.chatHistory.note}; 已对工作流聊天副本应用酒馆正则`
-        : '已对工作流聊天副本应用酒馆正则';
+        ? `${components.diagnostics.chatHistory.note}; ${regexSummaryText}`
+        : regexSummaryText;
+    }
+
+    if (regexSummary.worldInfoEntriesChanged > 0) {
+      components.diagnostics.worldInfoBefore = appendDiagnosticNote(
+        components.diagnostics.worldInfoBefore,
+        `已对前置世界书内容应用正则，命中 ${regexSummary.worldInfoEntriesChanged} 项`,
+      );
+      components.diagnostics.worldInfoAfter = appendDiagnosticNote(
+        components.diagnostics.worldInfoAfter,
+        `已对后置世界书内容应用正则，命中 ${regexSummary.worldInfoEntriesChanged} 项`,
+      );
     }
   }
 

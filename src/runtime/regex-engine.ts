@@ -1,20 +1,30 @@
 import { getHostRuntime, tryGetSTContext } from '../st-adapter';
+import type { EwFlowConfig } from './types';
+import type { ResolvedWiEntry } from './worldinfo-engine';
 
-/**
- * 酒馆正则处理引擎
- *
- * 收集预设、全局、角色卡三个来源的正则脚本，
- * 按 placement 过滤后对聊天消息执行查找替换。
- */
+type WorkflowRegexRole = 'system' | 'user' | 'assistant' | 'mixed';
+type WorkflowRegexSourceType = 'user_input' | 'ai_output' | 'world_info' | 'reasoning';
+type WorkflowRegexTargetKind = 'chat' | 'world_info';
 
-// ── 正则脚本数据结构 ──────────────────────────────────────────
-interface RegexScript {
+type HostRegexExecutionMode = 'host-formatter' | 'host-fallback' | 'host-unavailable' | 'off';
+
+type RegexScript = {
   id: string;
   scriptName: string;
   findRegex: string;
   replaceString: string;
   trimStrings: string[];
-  /** 规范化后的作用域：0=user, 1=assistant, 2=slash, 3=world info, 4=reasoning */
+  sourceFlags: {
+    user: boolean;
+    assistant: boolean;
+    worldInfo: boolean;
+    reasoning: boolean;
+    system: boolean;
+  };
+  destinationFlags: {
+    prompt: boolean;
+    display: boolean;
+  };
   placement: number[];
   disabled: boolean;
   markdownOnly: boolean;
@@ -23,180 +33,76 @@ interface RegexScript {
   substituteRegex: number | boolean;
   minDepth: number | null;
   maxDepth: number | null;
+  isTavernRule: boolean;
+  beautificationReplace: boolean;
+  sourceType: 'global' | 'preset' | 'character' | 'local';
   _placementMode?: 'canonical' | 'raw';
-}
+};
 
-// ── 收集所有正则脚本 ──────────────────────────────────────────
+type WorkflowRegexApplicationSummary = {
+  hostEnabled: boolean;
+  hostExecutionMode: HostRegexExecutionMode;
+  formatterAvailable: boolean;
+  hostRuleCount: number;
+  localRuleCount: number;
+  skippedDisplayOnlyRuleCount: number;
+  hostAppliedCount: number;
+  localAppliedCount: number;
+  chatMessagesProcessed: number;
+  chatMessagesChanged: number;
+  worldInfoEntriesProcessed: number;
+  worldInfoEntriesChanged: number;
+};
 
-/**
- * 从三个来源收集正则脚本：全局、预设绑定、角色卡局部。
- * 返回合并后的脚本数组（去重依据 id）。
- */
+type RegexTransformDebug = {
+  hostApplied: boolean;
+  localAppliedRuleCount: number;
+};
+
 type TavernRegexGetter = ((option: { type: 'global' | 'preset' | 'character'; name?: string }) => any[]) | undefined;
 type CharacterRegexEnabledGetter = (() => boolean) | undefined;
+type TavernRegexFormatter =
+  | ((
+      text: string,
+      source: 'user_input' | 'ai_output' | 'slash_command' | 'world_info' | 'reasoning',
+      destination: 'display' | 'prompt',
+      options?: { depth?: number; character_name?: string },
+    ) => string)
+  | undefined;
 
-export function collectAllRegexScripts(): RegexScript[] {
-  const scriptsById = new Map<string, RegexScript>();
-  const win = getHostRuntime() as any;
+const HTML_TAG_PATTERN =
+  /<\/?(?:div|span|p|br|hr|img|details|summary|section|article|aside|header|footer|nav|ul|ol|li|table|tr|td|th|h[1-6]|a|em|strong|blockquote|pre|code|svg|path)\b/i;
+const HTML_ATTR_PATTERN = /\b(?:style|class|id|href|src|data-)\s*=/i;
 
-  // 获取 ST 上下文
-  const ctx = tryGetSTContext() as Record<string, any> | undefined;
-  const getTavernRegexes: TavernRegexGetter = ctx?.getTavernRegexes ?? win.getTavernRegexes;
-  const isCharacterTavernRegexesEnabled: CharacterRegexEnabledGetter =
-    ctx?.isCharacterTavernRegexesEnabled ?? win.isCharacterTavernRegexesEnabled;
-
-  let globalCount = 0;
-  let presetCount = 0;
-  let characterCount = 0;
-
-  const addScripts = (items: any[], source: 'global' | 'preset' | 'character') => {
-    items.forEach((item, index) => {
-      if (!item) return;
-      const normalized = normalizeScript(item);
-      if (normalized.disabled || !normalized.findRegex) return;
-
-      const key = normalized.id || `${source}:${index}:${normalized.scriptName}:${normalized.findRegex}`;
-      scriptsById.set(key, normalized);
-
-      if (source === 'global') globalCount += 1;
-      if (source === 'preset') presetCount += 1;
-      if (source === 'character') characterCount += 1;
-    });
-  };
-
-  const readArrayPath = (root: any, paths: string[][]): any[] => {
-    for (const path of paths) {
-      let current = root;
-      let ok = true;
-      for (const segment of path) {
-        if (current == null || typeof current !== 'object') {
-          ok = false;
-          break;
-        }
-        current = current[segment];
+function readArrayPath(root: any, paths: string[][]): any[] {
+  for (const path of paths) {
+    let current = root;
+    let ok = true;
+    for (const segment of path) {
+      if (current == null || typeof current !== 'object') {
+        ok = false;
+        break;
       }
-      if (ok && Array.isArray(current)) return current;
+      current = current[segment];
     }
-    return [];
-  };
-
-  const collectViaApi = (source: 'global' | 'preset' | 'character'): any[] => {
-    if (typeof getTavernRegexes !== 'function') return [];
-    try {
-      if (source === 'global') return getTavernRegexes({ type: 'global' }) ?? [];
-      if (source === 'preset') return getTavernRegexes({ type: 'preset', name: 'in_use' }) ?? [];
-      if (source === 'character') {
-        if (typeof isCharacterTavernRegexesEnabled === 'function' && !isCharacterTavernRegexesEnabled()) {
-          return [];
-        }
-        return getTavernRegexes({ type: 'character', name: 'current' }) ?? [];
-      }
-    } catch (error) {
-      console.debug(`[EW Regex] getTavernRegexes(${source}) 读取失败，回退上下文路径:`, error);
+    if (ok && Array.isArray(current)) {
+      return current;
     }
-    return [];
-  };
-
-  // 来源 1：全局正则（ST 正则扩展存储在 extension_settings.regex 中）
-  try {
-    const apiScripts = collectViaApi('global');
-    if (apiScripts.length > 0) {
-      addScripts(apiScripts, 'global');
-    } else {
-      const extSettings = ctx?.extensionSettings ?? win.extension_settings;
-      addScripts(readArrayPath(extSettings, [['regex'], ['regex', 'regex_scripts']]), 'global');
-    }
-  } catch {
-    /* 全局正则不可用，跳过 */
   }
-
-  // 来源 2：预设绑定正则（当前预设 JSON 的 extensions.regex_scripts）
-  try {
-    const apiScripts = collectViaApi('preset');
-    if (apiScripts.length > 0) {
-      addScripts(apiScripts, 'preset');
-    } else {
-      const oaiSettings = ctx?.chatCompletionSettings ?? win.oai_settings;
-      addScripts(readArrayPath(oaiSettings, [['regex_scripts'], ['extensions', 'regex_scripts']]), 'preset');
-    }
-  } catch {
-    /* 预设正则不可用，跳过 */
-  }
-
-  // 来源 3：角色卡局部正则（优先 character.extensions.regex_scripts）
-  try {
-    const apiScripts = collectViaApi('character');
-    if (apiScripts.length > 0) {
-      addScripts(apiScripts, 'character');
-    } else {
-      const charId = ctx?.characterId;
-      const characters = ctx?.characters;
-      if (charId !== undefined && characters) {
-        const char = characters[Number(charId)];
-        addScripts(
-          readArrayPath(char, [
-            ['extensions', 'regex_scripts'],
-            ['data', 'extensions', 'regex_scripts'],
-          ]),
-          'character',
-        );
-      }
-    }
-  } catch {
-    /* 角色卡正则不可用，跳过 */
-  }
-
-  const scripts = [...scriptsById.values()];
-  normalizePlacementMode(scripts);
-
-  console.debug(
-    `[EW Regex] 收集完成: global=${globalCount}, preset=${presetCount}, character=${characterCount}, total=${scripts.length}`,
-  );
-
-  return scripts;
+  return [];
 }
 
-/** 将来源不同的脚本数据统一为 RegexScript 结构 */
-function normalizeScript(raw: any): RegexScript {
-  const placementFromSource = normalizePlacementFromSource(raw?.source);
-  const trimStrings = Array.isArray(raw.trimStrings)
-    ? raw.trimStrings
-    : typeof raw.trim_strings === 'string'
-      ? raw.trim_strings
-          .split('\n')
-          .map((item: string) => item.trim())
-          .filter(Boolean)
-      : [];
-
-  const replaceString = raw.replaceString ?? raw.replace_string ?? '';
-  const destination = raw?.destination;
-  const promptOnly =
-    typeof destination === 'object'
-      ? Boolean(destination.prompt) && !Boolean(destination.display)
-      : Boolean(raw.promptOnly);
-  const markdownOnly =
-    typeof destination === 'object'
-      ? Boolean(destination.display) && !Boolean(destination.prompt)
-      : Boolean(raw.markdownOnly);
-
-  return {
-    id: raw.id ?? '',
-    scriptName: raw.scriptName ?? raw.script_name ?? '',
-    findRegex: raw.findRegex ?? raw.find_regex ?? '',
-    replaceString,
-    trimStrings,
-    placement:
-      placementFromSource ??
-      (Array.isArray(raw.placement) ? raw.placement.filter((item: unknown) => typeof item === 'number') : []),
-    disabled: raw.enabled === false ? true : Boolean(raw.disabled),
-    markdownOnly,
-    promptOnly,
-    runOnEdit: Boolean(raw.runOnEdit ?? raw.run_on_edit),
-    substituteRegex: raw.substituteRegex ?? 0,
-    minDepth: raw.minDepth ?? null,
-    maxDepth: raw.maxDepth ?? null,
-    _placementMode: placementFromSource ? 'canonical' : 'raw',
-  };
+function normalizeTrimStrings(rawTrim: unknown): string[] {
+  if (Array.isArray(rawTrim)) {
+    return rawTrim.map(item => String(item ?? '')).filter(Boolean);
+  }
+  if (typeof rawTrim === 'string') {
+    return rawTrim
+      .split('\n')
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+  return [];
 }
 
 function normalizePlacementFromSource(source: any): number[] | null {
@@ -231,118 +137,617 @@ function normalizePlacementMode(scripts: RegexScript[]): void {
     script.placement = [...new Set(script.placement.map(value => modernPlacementMap[value] ?? value))];
     script._placementMode = 'canonical';
   }
-
-  console.debug('[EW Regex] 检测到新版 placement 编码，已转换为内部统一编号');
 }
 
-// ── 美化正则检测 ──────────────────────────────────────────────
+function buildSourceFlags(source: any, placement: number[], isTavernRule: boolean): RegexScript['sourceFlags'] {
+  if (source && typeof source === 'object') {
+    const user = Boolean(source.user_input);
+    const assistant = Boolean(source.ai_output);
+    const worldInfo = Boolean(source.world_info);
+    const reasoning = Boolean(source.reasoning);
+    return {
+      user,
+      assistant,
+      worldInfo,
+      reasoning,
+      system: assistant || worldInfo || reasoning,
+    };
+  }
 
-/**
- * 检测 replaceString 是否为美化/渲染用途。
- * 包含 HTML 标签、style/class 属性或 CSS 相关内容时判定为美化正则。
- */
-const HTML_TAG_PATTERN =
-  /<\/?(?:div|span|p|br|hr|img|details|summary|section|article|aside|header|footer|nav|ul|ol|li|table|tr|td|th|h[1-6]|a|em|strong|blockquote|pre|code|svg|path)\b/i;
-const HTML_ATTR_PATTERN = /\b(?:style|class|id|href|src|data-)\s*=/i;
+  if (isTavernRule && placement.length > 0) {
+    const user = placement.includes(0);
+    const assistant = placement.includes(1);
+    const worldInfo = placement.includes(3);
+    const reasoning = placement.includes(4);
+    return {
+      user,
+      assistant,
+      worldInfo,
+      reasoning,
+      system: assistant || worldInfo || reasoning,
+    };
+  }
+
+  return {
+    user: true,
+    assistant: true,
+    worldInfo: true,
+    reasoning: true,
+    system: true,
+  };
+}
+
+function normalizeScript(raw: any, sourceType: RegexScript['sourceType'], index: number, isTavernRule: boolean): RegexScript {
+  const source = raw?.source && typeof raw.source === 'object' ? raw.source : null;
+  const destination = raw?.destination && typeof raw.destination === 'object' ? raw.destination : null;
+  const placementFromSource = normalizePlacementFromSource(source);
+  const placement =
+    placementFromSource ??
+    (Array.isArray(raw?.placement) ? raw.placement.map((item: unknown) => Number(item)).filter(Number.isFinite) : []);
+  const replaceString = String(raw?.replaceString ?? raw?.replace_string ?? '');
+
+  return {
+    id: String(raw?.id ?? `${sourceType}:${index}`),
+    scriptName: String(raw?.scriptName ?? raw?.script_name ?? raw?.name ?? ''),
+    findRegex: String(raw?.findRegex ?? raw?.find_regex ?? ''),
+    replaceString,
+    trimStrings: normalizeTrimStrings(raw?.trimStrings ?? raw?.trim_strings),
+    sourceFlags: buildSourceFlags(source, placement, isTavernRule),
+    destinationFlags: {
+      prompt: destination ? Boolean(destination.prompt) : raw?.markdownOnly === true ? false : true,
+      display: destination ? Boolean(destination.display) : Boolean(raw?.markdownOnly),
+    },
+    placement,
+    disabled: raw?.enabled === false || Boolean(raw?.disabled),
+    markdownOnly: Boolean(raw?.markdownOnly),
+    promptOnly: Boolean(raw?.promptOnly),
+    runOnEdit: Boolean(raw?.runOnEdit ?? raw?.run_on_edit),
+    substituteRegex: raw?.substituteRegex ?? 0,
+    minDepth: Number.isFinite(Number(raw?.minDepth ?? raw?.min_depth)) ? Number(raw?.minDepth ?? raw?.min_depth) : null,
+    maxDepth: Number.isFinite(Number(raw?.maxDepth ?? raw?.max_depth)) ? Number(raw?.maxDepth ?? raw?.max_depth) : null,
+    isTavernRule,
+    beautificationReplace: isBeautificationReplace(replaceString),
+    sourceType,
+    _placementMode: placementFromSource ? 'canonical' : 'raw',
+  };
+}
+
+function parseRegexFromString(regexStr: string): RegExp | null {
+  if (!regexStr) return null;
+  const match = regexStr.trim().match(/^\/([\s\S]+)\/([gimsuy]*)$/);
+  if (match) {
+    try {
+      return new RegExp(match[1], match[2]);
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    return new RegExp(regexStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+  } catch {
+    return null;
+  }
+}
+
+function roleToSourceType(role: WorkflowRegexRole): WorkflowRegexSourceType {
+  return role === 'user' ? 'user_input' : 'ai_output';
+}
+
+function sourceMatchesRule(rule: RegexScript, sourceType: WorkflowRegexSourceType, role: WorkflowRegexRole): boolean {
+  if (sourceType === 'user_input') {
+    return role === 'mixed' ? rule.sourceFlags.user || rule.sourceFlags.assistant : rule.sourceFlags.user;
+  }
+  if (sourceType === 'ai_output') {
+    if (role === 'mixed') return rule.sourceFlags.user || rule.sourceFlags.assistant;
+    if (role === 'user') return rule.sourceFlags.user;
+    return rule.sourceFlags.assistant;
+  }
+  if (sourceType === 'world_info') {
+    return rule.sourceFlags.worldInfo;
+  }
+  return rule.sourceFlags.reasoning;
+}
+
+function depthMatchesRule(rule: RegexScript, depth: number | null | undefined): boolean {
+  if (!Number.isFinite(Number(depth))) {
+    return true;
+  }
+  const normalizedDepth = Number(depth);
+  if (rule.minDepth != null && normalizedDepth < Number(rule.minDepth)) {
+    return false;
+  }
+  if (rule.maxDepth != null && normalizedDepth > Number(rule.maxDepth)) {
+    return false;
+  }
+  return true;
+}
+
+function applyRule(text: string, rule: RegexScript): { text: string; changed: boolean; error?: string } {
+  const regex = parseRegexFromString(rule.findRegex);
+  if (!regex) {
+    return { text, changed: false, error: 'invalid_regex' };
+  }
+
+  let next = text.replace(regex, rule.replaceString || '');
+  for (const trimText of rule.trimStrings) {
+    if (!trimText) continue;
+    next = next.split(trimText).join('');
+  }
+
+  return {
+    text: next,
+    changed: next !== text,
+  };
+}
+
+function resolveRegexHost(): {
+  getTavernRegexes: TavernRegexGetter;
+  isCharacterTavernRegexesEnabled: CharacterRegexEnabledGetter;
+  formatAsTavernRegexedString: TavernRegexFormatter;
+  sourceLabel: string;
+} {
+  const ctx = tryGetSTContext() as Record<string, any> | undefined;
+  const win = getHostRuntime() as any;
+
+  return {
+    getTavernRegexes: ctx?.getTavernRegexes ?? win.getTavernRegexes,
+    isCharacterTavernRegexesEnabled: ctx?.isCharacterTavernRegexesEnabled ?? win.isCharacterTavernRegexesEnabled,
+    formatAsTavernRegexedString: ctx?.formatAsTavernRegexedString ?? win.formatAsTavernRegexedString,
+    sourceLabel: ctx?.formatAsTavernRegexedString
+      ? 'ctx.formatAsTavernRegexedString'
+      : win.formatAsTavernRegexedString
+        ? 'window.formatAsTavernRegexedString'
+        : ctx?.getTavernRegexes
+          ? 'ctx.getTavernRegexes'
+          : win.getTavernRegexes
+            ? 'window.getTavernRegexes'
+            : 'unavailable',
+  };
+}
+
+function collectViaApi(
+  source: 'global' | 'preset' | 'character',
+  host: ReturnType<typeof resolveRegexHost>,
+): { items: any[]; supported: boolean } {
+  const getter = host.getTavernRegexes;
+  if (typeof getter !== 'function') {
+    return { items: [], supported: false };
+  }
+
+  try {
+    if (source === 'global') {
+      return { items: getter({ type: 'global' }) ?? [], supported: true };
+    }
+    if (source === 'preset') {
+      return { items: getter({ type: 'preset', name: 'in_use' }) ?? [], supported: true };
+    }
+    if (typeof host.isCharacterTavernRegexesEnabled === 'function' && !host.isCharacterTavernRegexesEnabled()) {
+      return { items: [], supported: true };
+    }
+    return { items: getter({ type: 'character', name: 'current' }) ?? [], supported: true };
+  } catch {
+    return { items: [], supported: false };
+  }
+}
+
+export function collectAllRegexScripts(): RegexScript[] {
+  const scriptsById = new Map<string, RegexScript>();
+  const host = resolveRegexHost();
+  const ctx = tryGetSTContext() as Record<string, any> | undefined;
+  const win = getHostRuntime() as any;
+
+  const addScripts = (items: any[], sourceType: 'global' | 'preset' | 'character') => {
+    items.forEach((item, index) => {
+      if (!item) return;
+      const normalized = normalizeScript(item, sourceType, index, true);
+      if (normalized.disabled || !normalized.findRegex) return;
+
+      const key = normalized.id || `${sourceType}:${index}:${normalized.scriptName}:${normalized.findRegex}`;
+      scriptsById.set(key, normalized);
+    });
+  };
+
+  const globalViaApi = collectViaApi('global', host);
+  if (globalViaApi.supported) {
+    addScripts(globalViaApi.items, 'global');
+  } else {
+    addScripts(readArrayPath(ctx?.extensionSettings ?? win.extension_settings, [['regex'], ['regex', 'regex_scripts']]), 'global');
+  }
+
+  const presetViaApi = collectViaApi('preset', host);
+  if (presetViaApi.supported) {
+    addScripts(presetViaApi.items, 'preset');
+  } else {
+    addScripts(readArrayPath(ctx?.chatCompletionSettings ?? win.oai_settings, [['regex_scripts'], ['extensions', 'regex_scripts']]), 'preset');
+  }
+
+  const characterViaApi = collectViaApi('character', host);
+  if (characterViaApi.supported) {
+    addScripts(characterViaApi.items, 'character');
+  } else {
+    const charId = Number(ctx?.characterId);
+    const char = Number.isFinite(charId) && Array.isArray(ctx?.characters) ? ctx?.characters[charId] : null;
+    addScripts(readArrayPath(char, [['extensions', 'regex_scripts'], ['data', 'extensions', 'regex_scripts']]), 'character');
+  }
+
+  const scripts = [...scriptsById.values()];
+  normalizePlacementMode(scripts);
+  return scripts;
+}
+
+function collectLocalRegexRules(flow: EwFlowConfig): RegexScript[] {
+  return (Array.isArray(flow.custom_regex_rules) ? flow.custom_regex_rules : [])
+    .map((rule, index) => normalizeScript(rule, 'local', index, false))
+    .filter(rule => !rule.disabled && Boolean(rule.findRegex));
+}
 
 export function isBeautificationReplace(replaceString: string): boolean {
   if (!replaceString) return false;
   return HTML_TAG_PATTERN.test(replaceString) || HTML_ATTR_PATTERN.test(replaceString);
 }
 
-// ── 执行正则替换 ──────────────────────────────────────────────
+function buildHostExecutionMode(flow: EwFlowConfig, host: ReturnType<typeof resolveRegexHost>): HostRegexExecutionMode {
+  if (!flow.use_tavern_regex) {
+    return 'off';
+  }
+  if (typeof host.formatAsTavernRegexedString === 'function') {
+    return 'host-formatter';
+  }
+  if (typeof host.getTavernRegexes === 'function') {
+    return 'host-fallback';
+  }
+  return 'host-unavailable';
+}
 
-/**
- * 对单条消息内容执行一组正则脚本。
- *
- * @param content   消息文本
- * @param scripts   要执行的脚本数组
- * @param role      消息角色，决定使用 placement 0(user) 还是 1(assistant)
- * @returns 处理后的文本
- */
-function applyRegexScripts(content: string, scripts: RegexScript[], role: 'user' | 'assistant' | 'system'): string {
-  // 内部统一编号：0 = user input, 1 = AI output
-  // system 消息暂按 AI output 处理（与 ST 行为一致）
-  const targetPlacement = role === 'user' ? 0 : 1;
+function applyTavernRegexFallback(
+  text: string,
+  rules: RegexScript[],
+  sourceType: WorkflowRegexSourceType,
+  role: WorkflowRegexRole,
+  depth: number | null | undefined,
+): { text: string; appliedCount: number; skippedDisplayOnlyRuleCount: number } {
+  let next = text;
+  let appliedCount = 0;
+  let skippedDisplayOnlyRuleCount = 0;
 
-  let result = content;
-  for (const script of scripts) {
-    // 跳过禁用脚本
-    if (script.disabled) continue;
-    // 只保留 markdownOnly=false 的脚本（prompt 场景不是 markdown 渲染）
-    if (script.markdownOnly) continue;
-    // 检查 placement 是否匹配
-    if (!script.placement.includes(targetPlacement)) continue;
-    // 空正则跳过
-    if (!script.findRegex) continue;
+  for (const rule of rules) {
+    if (!rule.destinationFlags.prompt || rule.markdownOnly || rule.promptOnly) {
+      skippedDisplayOnlyRuleCount += 1;
+      continue;
+    }
+    if (rule.beautificationReplace) {
+      skippedDisplayOnlyRuleCount += 1;
+      continue;
+    }
+    if (!sourceMatchesRule(rule, sourceType, role)) continue;
+    if (!depthMatchesRule(rule, depth)) continue;
 
-    try {
-      const regex = parseRegexFromString(script.findRegex);
-      if (!regex) continue;
-
-      // 美化正则检测：replaceString 包含 HTML 标签 → 说明是用于渲染的美化正则，
-      // 在 prompt 场景中我们要的是干净正文，所以将其替换为空字符串（仅本地处理，不改酒馆原始正则）
-      let effectiveReplace = script.replaceString;
-      if (isBeautificationReplace(effectiveReplace)) {
-        console.debug(`[EW Regex] 检测到美化正则 "${script.scriptName}"，替换为空以获取干净正文`);
-        effectiveReplace = '';
-      }
-
-      result = result.replace(regex, effectiveReplace);
-
-      // 执行 trimStrings
-      for (const trim of script.trimStrings) {
-        if (trim) {
-          result = result.split(trim).join('');
-        }
-      }
-    } catch (e) {
-      console.warn(`[EW Regex] 脚本 "${script.scriptName}" 执行失败:`, e);
+    const result = applyRule(next, rule);
+    if (result.error) {
+      console.warn(`[EW Regex] 酒馆正则 "${rule.scriptName || rule.id}" 无效，已跳过`);
+      continue;
+    }
+    if (result.changed) {
+      appliedCount += 1;
+      next = result.text;
     }
   }
-  return result;
+
+  return {
+    text: next,
+    appliedCount,
+    skippedDisplayOnlyRuleCount,
+  };
 }
 
-/**
- * 将 ST 格式的正则字符串解析为 RegExp 对象。
- * ST 格式："/pattern/flags" 或纯字符串。
- */
-function parseRegexFromString(regexStr: string): RegExp | null {
-  if (!regexStr) return null;
-  // 尝试解析 /pattern/flags 格式
-  const match = regexStr.match(/^\/(.+)\/([gimsuy]*)$/s);
-  if (match) {
-    return new RegExp(match[1], match[2]);
+function applyLocalRegexRules(
+  text: string,
+  localRules: RegexScript[],
+  sourceType: WorkflowRegexSourceType,
+  role: WorkflowRegexRole,
+  depth: number | null | undefined,
+): { text: string; appliedCount: number } {
+  let next = text;
+  let appliedCount = 0;
+
+  for (const rule of localRules) {
+    if (!rule.destinationFlags.prompt || rule.markdownOnly) continue;
+    if (!sourceMatchesRule(rule, sourceType, role)) continue;
+    if (!depthMatchesRule(rule, depth)) continue;
+
+    const result = applyRule(next, rule);
+    if (result.error) {
+      console.warn(`[EW Regex] 自定义正则 "${rule.scriptName || rule.id}" 无效，已跳过`);
+      continue;
+    }
+    if (result.changed) {
+      appliedCount += 1;
+      next = result.text;
+    }
   }
-  // 纯字符串 → 当字面量使用
-  return new RegExp(regexStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+
+  return {
+    text: next,
+    appliedCount,
+  };
 }
 
-// ── 公开接口 ──────────────────────────────────────────────────
+function transformTextWithWorkflowRegex(
+  flow: EwFlowConfig,
+  text: string,
+  options: {
+    sourceType: WorkflowRegexSourceType;
+    role: WorkflowRegexRole;
+    depth?: number | null;
+    hostRules: RegexScript[];
+    localRules: RegexScript[];
+    hostExecutionMode: HostRegexExecutionMode;
+    formatter: TavernRegexFormatter;
+  },
+): { text: string; debug: RegexTransformDebug; skippedDisplayOnlyRuleCount: number } {
+  let next = text;
+  let hostApplied = false;
+  let localAppliedRuleCount = 0;
+  let skippedDisplayOnlyRuleCount = 0;
 
-/**
- * 对一组聊天消息应用酒馆的正则处理。
- * 收集全局 + 预设 + 角色卡的正则脚本，跳过 markdownOnly 脚本，
- * 按 placement 匹配消息角色后执行查找替换。
- *
- * @param messages  聊天消息数组（会被原地修改）
- */
+  if (options.hostExecutionMode === 'host-formatter' && typeof options.formatter === 'function') {
+    try {
+      const formatted = String(
+        options.formatter(next, options.sourceType, 'prompt', {
+          ...(Number.isFinite(Number(options.depth)) ? { depth: Number(options.depth) } : {}),
+        }) ?? next,
+      );
+      hostApplied = formatted !== next;
+      next = formatted;
+    } catch (error) {
+      console.debug('[EW Regex] 宿主 formatter 执行失败，回退插件侧兼容执行', error);
+      const fallback = applyTavernRegexFallback(next, options.hostRules, options.sourceType, options.role, options.depth);
+      next = fallback.text;
+      hostApplied = fallback.appliedCount > 0;
+      skippedDisplayOnlyRuleCount += fallback.skippedDisplayOnlyRuleCount;
+    }
+  } else if (options.hostExecutionMode === 'host-fallback') {
+    const fallback = applyTavernRegexFallback(next, options.hostRules, options.sourceType, options.role, options.depth);
+    next = fallback.text;
+    hostApplied = fallback.appliedCount > 0;
+    skippedDisplayOnlyRuleCount += fallback.skippedDisplayOnlyRuleCount;
+  }
+
+  const localResult = applyLocalRegexRules(next, options.localRules, options.sourceType, options.role, options.depth);
+  next = localResult.text;
+  localAppliedRuleCount = localResult.appliedCount;
+
+  return {
+    text: next,
+    debug: {
+      hostApplied,
+      localAppliedRuleCount,
+    },
+    skippedDisplayOnlyRuleCount,
+  };
+}
+
+function summarizeWorkflowRegex(
+  flow: EwFlowConfig,
+  hostExecutionMode: HostRegexExecutionMode,
+  formatterAvailable: boolean,
+  hostRules: RegexScript[],
+  localRules: RegexScript[],
+): WorkflowRegexApplicationSummary {
+  return {
+    hostEnabled: flow.use_tavern_regex,
+    hostExecutionMode,
+    formatterAvailable,
+    hostRuleCount: hostRules.length,
+    localRuleCount: localRules.length,
+    skippedDisplayOnlyRuleCount: 0,
+    hostAppliedCount: 0,
+    localAppliedCount: 0,
+    chatMessagesProcessed: 0,
+    chatMessagesChanged: 0,
+    worldInfoEntriesProcessed: 0,
+    worldInfoEntriesChanged: 0,
+  };
+}
+
+function applyRegexToChatMessages(
+  flow: EwFlowConfig,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string; name?: string }>,
+  hostRules: RegexScript[],
+  localRules: RegexScript[],
+  hostExecutionMode: HostRegexExecutionMode,
+  formatter: TavernRegexFormatter,
+  summary: WorkflowRegexApplicationSummary,
+): void {
+  const total = messages.length;
+  messages.forEach((message, index) => {
+    summary.chatMessagesProcessed += 1;
+    const depth = Math.max(total - index - 1, 0);
+    const original = message.content;
+    const result = transformTextWithWorkflowRegex(flow, message.content, {
+      sourceType: roleToSourceType(message.role),
+      role: message.role,
+      depth,
+      hostRules,
+      localRules,
+      hostExecutionMode,
+      formatter,
+    });
+    summary.skippedDisplayOnlyRuleCount += result.skippedDisplayOnlyRuleCount;
+    if (result.debug.hostApplied) summary.hostAppliedCount += 1;
+    if (result.debug.localAppliedRuleCount > 0) summary.localAppliedCount += result.debug.localAppliedRuleCount;
+    if (result.text !== original) {
+      summary.chatMessagesChanged += 1;
+      message.content = result.text;
+    }
+  });
+}
+
+function applyRegexToWorldInfoEntries(
+  flow: EwFlowConfig,
+  entries: ResolvedWiEntry[],
+  hostRules: RegexScript[],
+  localRules: RegexScript[],
+  hostExecutionMode: HostRegexExecutionMode,
+  formatter: TavernRegexFormatter,
+  summary: WorkflowRegexApplicationSummary,
+): void {
+  for (const entry of entries) {
+    summary.worldInfoEntriesProcessed += 1;
+    const original = entry.content;
+    const result = transformTextWithWorkflowRegex(flow, entry.content, {
+      sourceType: 'world_info',
+      role: entry.role === 'user' || entry.role === 'assistant' ? entry.role : 'system',
+      depth: Number.isFinite(Number(entry.depth)) ? Number(entry.depth) : null,
+      hostRules,
+      localRules,
+      hostExecutionMode,
+      formatter,
+    });
+    summary.skippedDisplayOnlyRuleCount += result.skippedDisplayOnlyRuleCount;
+    if (result.debug.hostApplied) summary.hostAppliedCount += 1;
+    if (result.debug.localAppliedRuleCount > 0) summary.localAppliedCount += result.debug.localAppliedRuleCount;
+    if (result.text !== original) {
+      summary.worldInfoEntriesChanged += 1;
+      entry.content = result.text;
+    }
+  }
+}
+
+export function applyWorkflowPromptRegex(
+  flow: EwFlowConfig,
+  targets: {
+    chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string; name?: string }>;
+    worldInfoBefore: ResolvedWiEntry[];
+    worldInfoAfter: ResolvedWiEntry[];
+  },
+): WorkflowRegexApplicationSummary {
+  const host = resolveRegexHost();
+  const hostExecutionMode = buildHostExecutionMode(flow, host);
+  const hostRules = flow.use_tavern_regex ? collectAllRegexScripts() : [];
+  const localRules = collectLocalRegexRules(flow);
+  const summary = summarizeWorkflowRegex(
+    flow,
+    hostExecutionMode,
+    typeof host.formatAsTavernRegexedString === 'function',
+    hostRules,
+    localRules,
+  );
+
+  if (targets.chatMessages.length > 0) {
+    applyRegexToChatMessages(
+      flow,
+      targets.chatMessages,
+      hostRules,
+      localRules,
+      hostExecutionMode,
+      host.formatAsTavernRegexedString,
+      summary,
+    );
+  }
+
+  if (targets.worldInfoBefore.length > 0) {
+    applyRegexToWorldInfoEntries(
+      flow,
+      targets.worldInfoBefore,
+      hostRules,
+      localRules,
+      hostExecutionMode,
+      host.formatAsTavernRegexedString,
+      summary,
+    );
+  }
+
+  if (targets.worldInfoAfter.length > 0) {
+    applyRegexToWorldInfoEntries(
+      flow,
+      targets.worldInfoAfter,
+      hostRules,
+      localRules,
+      hostExecutionMode,
+      host.formatAsTavernRegexedString,
+      summary,
+    );
+  }
+
+  return summary;
+}
+
+export function describeWorkflowRegexSummary(summary: WorkflowRegexApplicationSummary): string {
+  const hostLabel =
+    summary.hostExecutionMode === 'off'
+      ? '关闭'
+      : summary.hostExecutionMode === 'host-formatter'
+        ? '宿主直用'
+        : summary.hostExecutionMode === 'host-fallback'
+          ? '插件回退'
+          : '宿主不可用';
+  return `已执行正则链：宿主=${hostLabel}，宿主规则=${summary.hostRuleCount}，本地规则=${summary.localRuleCount}，聊天命中=${summary.chatMessagesChanged}/${summary.chatMessagesProcessed}，世界书命中=${summary.worldInfoEntriesChanged}/${summary.worldInfoEntriesProcessed}`;
+}
+
 export function applyTavernRegex(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string; name?: string }>,
 ): void {
-  const scripts = collectAllRegexScripts();
-  if (!scripts.length) {
-    console.debug('[EW Regex] 没有可用的正则脚本');
-    return;
-  }
+  const host = resolveRegexHost();
+  const hostExecutionMode: HostRegexExecutionMode =
+    typeof host.formatAsTavernRegexedString === 'function'
+      ? 'host-formatter'
+      : typeof host.getTavernRegexes === 'function'
+        ? 'host-fallback'
+        : 'host-unavailable';
+  const hostRules = collectAllRegexScripts();
 
-  console.debug(`[EW Regex] 收集到 ${scripts.length} 条正则脚本，开始处理 ${messages.length} 条消息`);
-
-  for (const msg of messages) {
-    const original = msg.content;
-    msg.content = applyRegexScripts(msg.content, scripts, msg.role);
-    if (msg.content !== original) {
-      console.debug(`[EW Regex] 消息已处理 (role=${msg.role}, name=${msg.name ?? 'N/A'})`);
-    }
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    const result = transformTextWithWorkflowRegex(
+      {
+        use_tavern_regex: true,
+        custom_regex_rules: [],
+      } as unknown as EwFlowConfig,
+      message.content,
+      {
+        sourceType: roleToSourceType(message.role),
+        role: message.role,
+        depth: Math.max(messages.length - index - 1, 0),
+        hostRules,
+        localRules: [],
+        hostExecutionMode,
+        formatter: host.formatAsTavernRegexedString,
+      },
+    );
+    message.content = result.text;
   }
+}
+
+export function applyTavernRegexFallbackForTest(
+  text: string,
+  rawRules: any[],
+  sourceType: WorkflowRegexSourceType,
+  role: WorkflowRegexRole,
+  depth?: number | null,
+): { text: string; appliedCount: number; skippedDisplayOnlyRuleCount: number } {
+  return applyTavernRegexFallback(
+    text,
+    rawRules.map((rule, index) => normalizeScript(rule, 'global', index, true)),
+    sourceType,
+    role,
+    depth,
+  );
+}
+
+export function applyLocalWorkflowRegexForTest(
+  text: string,
+  rawRules: any[],
+  sourceType: WorkflowRegexSourceType,
+  role: WorkflowRegexRole,
+  depth?: number | null,
+): { text: string; appliedCount: number } {
+  return applyLocalRegexRules(
+    text,
+    rawRules.map((rule, index) => normalizeScript(rule, 'local', index, false)),
+    sourceType,
+    role,
+    depth,
+  );
 }
