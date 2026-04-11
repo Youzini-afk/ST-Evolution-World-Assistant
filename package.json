@@ -4,9 +4,11 @@
   "private": true,
   "description": "Evolution World — SillyTavern Extension",
   "scripts": {
+    "check": "tsc --noEmit",
     "build": "webpack --mode production",
     "build:dev": "webpack --mode development",
     "watch": "webpack --mode development --watch --progress",
+    "bump:manifest": "node scripts/bump-manifest-version.mjs",
     "validate:critical": "ts-node --transpile-only --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" scripts/validate-critical.ts",
     "test": "npm run validate:critical"
   },
