@@ -2,6 +2,11 @@ import { buildFlowRequest } from './context-builder';
 import { FlowRequestV1, FlowResponseSchema, FlowTriggerV1 } from './contracts';
 import { assembleOrderedPrompts, collectPromptComponents, PromptComponents } from './prompt-assembler';
 import {
+  buildJsonObjectStructuredSchema,
+  buildStructuredOutputRequestAugment,
+  isJsonObjectStructuredOutputMode,
+} from './structured-output';
+import {
   ContextCursor,
   DispatchFlowAttempt,
   DispatchFlowResult,
@@ -306,6 +311,12 @@ function buildMainApiStBackendRequestBody(
     return null;
   }
 
+  const structuredOutput = buildStructuredOutputRequestAugment(
+    flow.behavior_options.structured_output,
+    String(chatSettings.chat_completion_source ?? 'openai'),
+    String(chatSettings.custom_include_body ?? ''),
+  );
+
   return {
     messages: orderedPrompts,
     model,
@@ -326,7 +337,7 @@ function buildMainApiStBackendRequestBody(
     proxy_password: String(chatSettings.proxy_password ?? ''),
     custom_url: String(chatSettings.custom_url ?? ''),
     custom_include_headers: String(chatSettings.custom_include_headers ?? ''),
-    custom_include_body: String(chatSettings.custom_include_body ?? ''),
+    custom_include_body: structuredOutput.customIncludeBody ?? String(chatSettings.custom_include_body ?? ''),
     custom_exclude_body: String(chatSettings.custom_exclude_body ?? ''),
     custom_prompt_post_processing: String(chatSettings.custom_prompt_post_processing ?? 'strict'),
     use_sysprompt: Boolean(chatSettings.use_sysprompt),
@@ -334,6 +345,16 @@ function buildMainApiStBackendRequestBody(
     assistant_impersonation: String(chatSettings.assistant_impersonation ?? ''),
     continue_prefill: flow.behavior_options.continue_prefill || Boolean(chatSettings.continue_prefill),
     squash_system_messages: flow.behavior_options.squash_system_messages,
+    ...(structuredOutput.jsonSchema ? { json_schema: structuredOutput.jsonSchema } : {}),
+    ...(structuredOutput.transportMode !== 'off'
+      ? {
+          ew_structured_output: {
+            requested_mode: flow.behavior_options.structured_output,
+            transport_mode: structuredOutput.transportMode,
+            ...(structuredOutput.note ? { note: structuredOutput.note } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -342,6 +363,12 @@ function buildCustomStBackendRequestBody(
   apiPreset: EwApiPreset,
   orderedPrompts: Array<{ role: 'system' | 'assistant' | 'user'; content: string }>,
 ): Record<string, any> {
+  const structuredOutput = buildStructuredOutputRequestAugment(
+    flow.behavior_options.structured_output,
+    'custom',
+    '',
+  );
+
   return {
     messages: orderedPrompts,
     model: apiPreset.model.trim().replace(/^models\//, ''),
@@ -361,7 +388,18 @@ function buildCustomStBackendRequestBody(
     proxy_password: '',
     custom_url: apiPreset.api_url.trim(),
     custom_include_headers: buildCustomIncludeHeaders(apiPreset),
+    custom_include_body: structuredOutput.customIncludeBody ?? '',
     custom_prompt_post_processing: 'strict',
+    ...(structuredOutput.jsonSchema ? { json_schema: structuredOutput.jsonSchema } : {}),
+    ...(structuredOutput.transportMode !== 'off'
+      ? {
+          ew_structured_output: {
+            requested_mode: flow.behavior_options.structured_output,
+            transport_mode: structuredOutput.transportMode,
+            ...(structuredOutput.note ? { note: structuredOutput.note } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -844,6 +882,9 @@ async function executeFlowViaLlmConnector(
       should_stream: flow.generation_options.stream,
       should_silence: true,
       ordered_prompts: orderedPrompts,
+      ...(isJsonObjectStructuredOutputMode(flow.behavior_options.structured_output)
+        ? { jsonSchema: buildJsonObjectStructuredSchema() }
+        : {}),
     });
 
     throwIfDispatchAborted(abortSignal, isCancelled);
@@ -915,6 +956,9 @@ async function executeFlowViaGenerateRawCustomApi(
       should_silence: true,
       custom_api: customApi,
       ordered_prompts: orderedPrompts,
+      ...(isJsonObjectStructuredOutputMode(flow.behavior_options.structured_output)
+        ? { jsonSchema: buildJsonObjectStructuredSchema() }
+        : {}),
     });
 
     throwIfDispatchAborted(abortSignal, isCancelled);
@@ -1086,6 +1130,7 @@ async function executeFlow(
   const attemptApiUrl = usesTavernMain ? 'tavern://main_api' : apiPreset.api_url;
   const generationId = `${requestId}:${flow.id}`;
   const streamEnabled = flow.generation_options.stream;
+  const structuredOutputEnabled = isJsonObjectStructuredOutputMode(flow.behavior_options.structured_output);
   let lastStreamSignature = '';
   let response: NonNullable<DispatchFlowAttempt['response']> | undefined;
   let requestDebug: Record<string, any> = {
@@ -1158,19 +1203,32 @@ async function executeFlow(
     );
     const orderedPrompts = await buildOrderedPromptsForFlow(flow, promptComponents, body);
     const mainApiStreamBridgeRequest =
-      usesTavernMain && streamEnabled ? buildMainApiStBackendRequestBody(flow, orderedPrompts) : null;
+      usesTavernMain && (streamEnabled || structuredOutputEnabled)
+        ? buildMainApiStBackendRequestBody(flow, orderedPrompts)
+        : null;
+    const shouldUseGenerateRawCustomRoute =
+      !structuredOutputEnabled && shouldUseGenerateRawCustomApi(apiPreset);
     const requestDebugBase = {
       route: usesTavernMain
         ? mainApiStreamBridgeRequest
-          ? '/api/backends/chat-completions/generate (main_api stream bridge)'
+          ? structuredOutputEnabled && !streamEnabled
+            ? '/api/backends/chat-completions/generate (main_api structured output bridge)'
+            : '/api/backends/chat-completions/generate (main_api stream bridge)'
           : 'generateRaw(main_api)'
-        : shouldUseGenerateRawCustomApi(apiPreset)
+        : shouldUseGenerateRawCustomRoute
           ? streamEnabled
             ? '/api/backends/chat-completions/generate (custom_api stream bridge)'
             : 'generateRaw(custom_api)'
           : '/api/backends/chat-completions/generate',
       flow_request: request,
       assembled_messages: orderedPrompts,
+      ...(structuredOutputEnabled
+        ? {
+            structured_output: {
+              requested_mode: flow.behavior_options.structured_output,
+            },
+          }
+        : {}),
     };
     requestDebug = requestDebugBase as Record<string, any>;
 
@@ -1206,7 +1264,7 @@ async function executeFlow(
           isCancelled,
         );
       }
-    } else if (shouldUseGenerateRawCustomApi(apiPreset)) {
+    } else if (shouldUseGenerateRawCustomRoute) {
       if (streamEnabled) {
         const streamBridgeRequest = buildCustomStBackendRequestBody(flow, apiPreset, orderedPrompts);
         requestDebug = {

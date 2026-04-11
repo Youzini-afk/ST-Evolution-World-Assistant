@@ -519,6 +519,13 @@ const FIELD_HELP_LIST: FieldHelpMeta[] = [
     placeholder: '{"context":{"turns":{{context.turns}}}}',
   },
   {
+    key: 'flow.structured_output',
+    label: '结构化输出',
+    shortHelp: '要求模型优先输出 JSON 对象，适合工作流编排结果。 ',
+    detailHelp:
+      '开启后，插件会优先向兼容后端请求 JSON 对象输出；当宿主链路不支持直传 json_object 时，会自动退回宽松 JSON Schema 兼容模式。',
+  },
+  {
     key: 'flow.response_remove_regex',
     label: '移除正则',
     shortHelp: 'AI 响应后处理：移除匹配的内容（如思考过程标签）。',

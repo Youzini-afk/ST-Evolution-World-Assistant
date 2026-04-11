@@ -21,6 +21,7 @@ import { buildDebugHighlightSegments } from '../src/ui/debug-highlight';
 import { collectDynWriteConflictsForTest } from '../src/runtime/transaction';
 import { buildRunWarningFromCommitSummaryForTest } from '../src/runtime/pipeline';
 import { isSnapshotResolutionUnsafeForDestructiveWriteForTest } from '../src/runtime/floor-binding';
+import { buildStructuredOutputRequestAugment } from '../src/runtime/structured-output';
 
 function buildSampleSettings() {
   return EwSettingsSchema.parse({
@@ -288,6 +289,29 @@ function validateSnapshotResolutionSafety(): void {
   );
 }
 
+function validateStructuredOutputAugment(): void {
+  const customAugment = buildStructuredOutputRequestAugment('json_object', 'custom', '');
+  assert.equal(customAugment.transportMode, 'response_format_json_object');
+  assert.ok(customAugment.customIncludeBody);
+  assert.deepEqual(JSON.parse(customAugment.customIncludeBody as string), {
+    response_format: {
+      type: 'json_object',
+    },
+  });
+
+  const openAiAugment = buildStructuredOutputRequestAugment('json_object', 'openai', '');
+  assert.equal(openAiAugment.transportMode, 'json_schema_fallback');
+  assert.equal(openAiAugment.jsonSchema?.value.type, 'object');
+  assert.equal(openAiAugment.jsonSchema?.value.additionalProperties, true);
+
+  const invalidCustomBodyAugment = buildStructuredOutputRequestAugment('json_object', 'custom', 'top_k: [20');
+  assert.equal(invalidCustomBodyAugment.transportMode, 'json_schema_fallback');
+  assert.equal(typeof invalidCustomBodyAugment.note, 'string');
+
+  const offAugment = buildStructuredOutputRequestAugment('off', 'custom', '');
+  assert.equal(offAugment.transportMode, 'off');
+}
+
 function main(): void {
   validateSharedSettingsSanitization();
   validateExtensionBucketFallback();
@@ -296,6 +320,7 @@ function main(): void {
   validateDynConflictSemantics();
   validateRunWarningSemantics();
   validateSnapshotResolutionSafety();
+  validateStructuredOutputAugment();
   console.log('validate:critical passed');
 }
 

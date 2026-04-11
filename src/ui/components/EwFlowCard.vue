@@ -308,6 +308,15 @@
                   <option value="high">高</option>
                 </select>
               </EwFieldRow>
+              <EwFieldRow label="结构化输出" :help="help('flow.structured_output')">
+                <select
+                  :value="flow.behavior_options.structured_output"
+                  @change="setBehaviorSelectByEvent('structured_output', $event)"
+                >
+                  <option value="off">关闭</option>
+                  <option value="json_object">JSON对象</option>
+                </select>
+              </EwFieldRow>
             </div>
 
             <!-- Toggle switches grid -->
@@ -891,7 +900,7 @@ type BehaviorBoolKey =
   | 'enable_function_calling'
   | 'send_inline_media'
   | 'request_thinking';
-type BehaviorSelectKey = 'name_behavior' | 'reasoning_effort' | 'verbosity';
+type BehaviorSelectKey = 'name_behavior' | 'reasoning_effort' | 'verbosity' | 'structured_output';
 
 const props = defineProps<{ modelValue: EwFlowConfig; apiPresets: EwApiPreset[]; index: number; expanded: boolean }>();
 const emit = defineEmits<{

@@ -31,6 +31,7 @@ export const EwFlowBehaviorOptionsSchema = z.object({
   name_behavior: z.enum(['none', 'default', 'complete_target', 'message_content']).default('default'),
   continue_prefill: z.boolean().default(false),
   squash_system_messages: z.boolean().default(false),
+  structured_output: z.enum(['off', 'json_object']).default('off'),
   enable_function_calling: z.boolean().default(false),
   send_inline_media: z.boolean().default(false),
   request_thinking: z.boolean().default(false),
