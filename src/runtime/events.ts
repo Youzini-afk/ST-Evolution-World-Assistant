@@ -4,6 +4,7 @@ import {
   onSTEvent,
   onSTEventFirst,
 } from "../st-adapter";
+import { klona } from "klona";
 import { EwWorkflowNoticeInput, showManagedWorkflowNotice } from "../ui/notice";
 import { getEffectiveFlows } from "./char-flows";
 import {

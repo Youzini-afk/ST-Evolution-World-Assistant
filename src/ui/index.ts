@@ -2,6 +2,8 @@ import { createScriptIdDiv, teleportStyle } from '../util/script';
 import { getSettings, patchSettings } from '../runtime/settings';
 import App from './App.vue';
 import { showEwNotice } from './notice';
+import { createPinia } from 'pinia';
+import { createApp } from 'vue';
 
 // 提前判断悬浮球是否可见 —— 如果设置尚未加载，默认为 true
 function shouldShowFab(): boolean {

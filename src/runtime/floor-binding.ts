@@ -16,6 +16,7 @@ import {
 } from './compat/events';
 import { replaceWorldbook } from './compat/worldbook';
 import { buildMessageVersionKey, getMessageVersionInfo, resolveControllerSnapshotEntryName } from './helpers';
+import { klona } from 'klona';
 import {
   buildChatFingerprint,
   buildFileName,

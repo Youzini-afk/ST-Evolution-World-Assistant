@@ -13,6 +13,7 @@ import { replaceWorldbook } from './compat/worldbook';
 import { simpleHash } from './helpers';
 import { EwFlowConfig, EwFlowConfigSchema, EwSettings } from './types';
 import { ensureDefaultEntry, resolveTargetWorldbook } from './worldbook-runtime';
+import { klona } from 'klona';
 
 /** 角色卡工作流在世界书中的条目名称 */
 export const CHAR_FLOWS_ENTRY_NAME = 'EW/Flows';

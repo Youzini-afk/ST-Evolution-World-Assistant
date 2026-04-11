@@ -1,4 +1,5 @@
 import { readExtensionSettings, writeExtensionSettings } from '../st-adapter';
+import { klona } from 'klona';
 import { createDefaultApiPreset, createDefaultFlow } from './factory';
 import { simpleHash } from './helpers';
 import {

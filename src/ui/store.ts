@@ -50,6 +50,9 @@ import { getCurrentChatIdSafe as getHostCurrentChatIdSafe } from '../st-adapter'
 import { convertStPresetToFlow, isSillyTavernPreset } from './convertStPreset';
 import type { TabKey } from './help-meta';
 import { showEwNotice } from './notice';
+import { defineStore } from 'pinia';
+import { klona } from 'klona';
+import { onScopeDispose, ref, watch } from 'vue';
 
 export const useEwStore = defineStore('evolution-world-store', () => {
   const settings = ref<EwSettings>(getSettings());

@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { StoreDefinition } from 'pinia';
+import { defineStore, type StoreDefinition } from 'pinia';
+import { ref, type Ref } from 'vue';
+import { useIntervalFn, watchIgnorable } from '@vueuse/core';
 
 // 旧 TavernHelper 全局类型存根 — mvu.ts 是死代码,保留编译兼容
 type VariableOption = { type: string; message_id?: number | string; [key: string]: any };
@@ -51,7 +53,7 @@ export function defineMvuDataStore<T extends z.ZodObject>(
 
       const { ignoreUpdates } = watchIgnorable(
         data,
-        new_data => {
+        (new_data: z.infer<T>) => {
           const result = schema.safeParse(new_data);
           if (result.error) {
             return;

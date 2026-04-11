@@ -1,6 +1,7 @@
 import { markFloorEntries } from './floor-binding';
 import { getMessageVersionInfo } from './helpers';
 import { saveControllerBackup } from './settings';
+import { klona } from 'klona';
 import {
   CommitSummary,
   ControllerEntrySnapshot,

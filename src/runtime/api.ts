@@ -9,6 +9,7 @@ import { resolveTargetWorldbook } from './worldbook-runtime';
 import { assertWorkflowSupport } from './workflow-support';
 import { getWorldbook, replaceWorldbook } from './compat/worldbook';
 import { getChatMessages, getLastMessageId, getChatId } from './compat/character';
+import { klona } from 'klona';
 
 declare global {
   interface Window {
