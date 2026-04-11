@@ -25,11 +25,16 @@ import { applyLocalWorkflowRegexForTest, applyTavernRegexFallbackForTest } from 
 import { buildStructuredOutputRequestAugment } from '../src/runtime/structured-output';
 import {
   clearDryRunPromptPreview,
+  clearSendIntent,
   consumeDryRunPromptPreview,
+  hasFreshSendIntent,
   isMvuExtraAnalysisGuardActive,
+  isTavernHelperPromptViewerRefreshActive,
   markDryRunPromptPreview,
   readMvuExtraAnalysisFlag,
+  recordUserSendIntent,
   resetRuntimeState,
+  shouldSkipTavernHelperPromptViewerSyntheticGeneration,
 } from '../src/runtime/state';
 
 function buildSampleSettings() {
@@ -430,6 +435,61 @@ function validateRuntimeTriggerGuards(): void {
   }
 }
 
+function validatePromptViewerSyntheticGenerationGuard(): void {
+  resetRuntimeState();
+
+  const runtime = globalThis as typeof globalThis & {
+    document?: {
+      querySelectorAll?: (selector: string) => Array<{
+        textContent?: string;
+        querySelector?: (selector: string) => unknown;
+      }>;
+    };
+  };
+  const previousDocument = runtime.document;
+
+  try {
+    runtime.document = {
+      querySelectorAll: (selector: string) => {
+        if (selector !== '[role="dialog"]') {
+          return [];
+        }
+
+        return [
+          {
+            textContent: '酒馆助手 Prompt Viewer 提示词查看器',
+            querySelector: (innerSelector: string) =>
+              innerSelector === '.fa-rotate-right.animate-spin' ? {} : null,
+          },
+        ];
+      },
+    };
+
+    assert.equal(isTavernHelperPromptViewerRefreshActive(), true);
+    assert.equal(hasFreshSendIntent(), false);
+    assert.equal(
+      shouldSkipTavernHelperPromptViewerSyntheticGeneration(),
+      true,
+    );
+
+    recordUserSendIntent('用户刚刚点击了发送');
+    assert.equal(hasFreshSendIntent(), true);
+    assert.equal(
+      shouldSkipTavernHelperPromptViewerSyntheticGeneration(),
+      false,
+    );
+
+    clearSendIntent();
+    assert.equal(
+      shouldSkipTavernHelperPromptViewerSyntheticGeneration(),
+      true,
+    );
+  } finally {
+    runtime.document = previousDocument;
+    resetRuntimeState();
+  }
+}
+
 function main(): void {
   validateSharedSettingsSanitization();
   validateExtensionBucketFallback();
@@ -441,6 +501,7 @@ function main(): void {
   validateStructuredOutputAugment();
   validateWorkflowRegexPipeline();
   validateRuntimeTriggerGuards();
+  validatePromptViewerSyntheticGenerationGuard();
   console.log('validate:critical passed');
 }
 

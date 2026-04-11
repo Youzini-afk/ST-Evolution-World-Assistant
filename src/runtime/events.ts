@@ -58,6 +58,7 @@ import {
   clearAfterReplyPendingIfMatches,
   clearBeforeReplyBindingPending,
   clearDryRunPromptPreview,
+  clearSendIntent,
   clearSendContext,
   clearSendContextIfMatches,
   consumeDryRunPromptPreview,
@@ -74,6 +75,7 @@ import {
   resetRuntimeState,
   setBeforeReplyBindingPending,
   setProcessing,
+  shouldSkipTavernHelperPromptViewerSyntheticGeneration,
   shouldHandleAfterReply,
   shouldHandleGenerationAfter,
   wasAfterReplyHandled,
@@ -3038,6 +3040,14 @@ async function onBeforeCombinePrompts(
       "[Evolution World] GENERATE_BEFORE_COMBINE_PROMPTS observed during MVU extra analysis",
     );
   }
+
+  if (shouldSkipTavernHelperPromptViewerSyntheticGeneration()) {
+    clearSendIntent();
+    console.debug(
+      "[Evolution World] GENERATE_BEFORE_COMBINE_PROMPTS skipped: Tavern Helper prompt viewer synthetic generation",
+    );
+    return;
+  }
 }
 
 async function onGenerationAfterCommands(
@@ -3054,6 +3064,8 @@ async function onGenerationAfterCommands(
     return;
   }
 
+  const generationType = String(type || "normal").trim() || "normal";
+
   if (consumeDryRunPromptPreview()) {
     console.debug(
       "[Evolution World] GENERATION_AFTER_COMMANDS skipped: dry-run prompt preview bridge active",
@@ -3064,6 +3076,17 @@ async function onGenerationAfterCommands(
   if (isMvuExtraAnalysisGuardActive()) {
     console.debug(
       "[Evolution World] GENERATION_AFTER_COMMANDS skipped: MVU extra analysis guard active",
+    );
+    return;
+  }
+
+  if (
+    generationType === "normal" &&
+    shouldSkipTavernHelperPromptViewerSyntheticGeneration()
+  ) {
+    clearSendIntent();
+    console.debug(
+      "[Evolution World] GENERATION_AFTER_COMMANDS skipped: Tavern Helper prompt viewer synthetic generation",
     );
     return;
   }
@@ -3973,6 +3996,18 @@ export function initRuntimeEvents() {
         (type: string, params: Record<string, any>, dryRun: boolean) => {
           if (dryRun) {
             markDryRunPromptPreview();
+            return;
+          }
+
+          const generationType = String(type || "normal").trim() || "normal";
+          if (
+            generationType === "normal" &&
+            shouldSkipTavernHelperPromptViewerSyntheticGeneration()
+          ) {
+            clearSendIntent();
+            console.debug(
+              "[Evolution World] GENERATION_STARTED skipped: Tavern Helper prompt viewer synthetic generation",
+            );
             return;
           }
 

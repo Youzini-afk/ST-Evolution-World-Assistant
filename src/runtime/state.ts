@@ -3,6 +3,7 @@ import { EwSettings } from './types';
 
 const DRY_RUN_PROMPT_PREVIEW_BRIDGE_MS = 1200;
 const MVU_EXTRA_ANALYSIS_GUARD_TTL_MS = 2500;
+const PROMPT_VIEWER_SEND_INTENT_TTL_MS = 60000;
 
 type SendRecord = {
   message_id: number;
@@ -108,6 +109,10 @@ export function recordUserSendIntent(user_input: string) {
   };
 }
 
+export function clearSendIntent(): void {
+  state.last_send_intent = null;
+}
+
 export function recordGeneration(type: string, params: Record<string, any> | undefined, dry_run: boolean) {
   generationSeq += 1;
   state.last_generation = {
@@ -152,6 +157,57 @@ export function consumeDryRunPromptPreview(currentAt = now()): boolean {
 
   dryRunPromptPreviewUntil = 0;
   return true;
+}
+
+export function hasFreshSendIntent(
+  currentAt = now(),
+  ttl_ms = PROMPT_VIEWER_SEND_INTENT_TTL_MS,
+): boolean {
+  const record = state.last_send_intent;
+  const resolvedTtlMs = Math.max(
+    1000,
+    Math.floor(Number(ttl_ms) || PROMPT_VIEWER_SEND_INTENT_TTL_MS),
+  );
+  return Boolean(
+    record?.user_input &&
+      record.at &&
+      currentAt - record.at <= resolvedTtlMs,
+  );
+}
+
+export function isTavernHelperPromptViewerRefreshActive(): boolean {
+  try {
+    const doc = globalThis.document;
+    if (!doc?.querySelectorAll) {
+      return false;
+    }
+
+    const dialogs = Array.from(doc.querySelectorAll('[role="dialog"]'));
+    for (const dialog of dialogs) {
+      const dialogText = String((dialog as HTMLElement | null)?.textContent ?? '');
+      if (!/(提示词查看器|prompt\s*viewer)/i.test(dialogText)) {
+        continue;
+      }
+
+      if ((dialog as ParentNode | null)?.querySelector?.('.fa-rotate-right.animate-spin')) {
+        return true;
+      }
+    }
+  } catch {
+    // ignore DOM probe failures and treat as inactive
+  }
+
+  return false;
+}
+
+export function shouldSkipTavernHelperPromptViewerSyntheticGeneration(
+  currentAt = now(),
+): boolean {
+  if (!isTavernHelperPromptViewerRefreshActive()) {
+    return false;
+  }
+
+  return !hasFreshSendIntent(currentAt);
 }
 
 export function readMvuExtraAnalysisFlag(): boolean {
