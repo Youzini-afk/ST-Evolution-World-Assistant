@@ -1,5 +1,6 @@
 import { readExtensionSettings, writeExtensionSettings } from '../st-adapter';
 import { klona } from 'klona';
+import { normalizeApiBaseUrl, normalizeApiSource } from './api-sources';
 import { createDefaultApiPreset, createDefaultFlow } from './factory';
 import { simpleHash } from './helpers';
 import {
@@ -161,8 +162,9 @@ function normalizeApiPresets(rawPresets: EwApiPreset[]): EwApiPreset[] {
       name,
       mode: parsed.mode ?? 'workflow_http',
       use_main_api: parsed.use_main_api ?? false,
+      api_url: normalizeApiBaseUrl(parsed.api_source, parsed.api_url),
       model: parsed.model ?? '',
-      api_source: parsed.api_source ?? 'openai',
+      api_source: normalizeApiSource(parsed.api_source),
       model_candidates: parsed.model_candidates ?? [],
     });
   });
@@ -283,7 +285,7 @@ function normalizeSettings(raw: unknown): EwSettings {
         api_url: nextFlow.api_url,
         api_key: nextFlow.api_key,
         model: '',
-        api_source: 'openai',
+        api_source: normalizeApiSource('openai'),
         model_candidates: [],
         headers_json: nextFlow.headers_json,
       });

@@ -193,11 +193,18 @@ const FIELD_HELP_LIST: FieldHelpMeta[] = [
       '自定义API模式需要你填写 URL/Key/模型；酒馆连接器模式会直接使用酒馆当前主API与当前模型，不需要额外配置。',
   },
   {
+    key: 'api_preset.api_source',
+    label: '渠道类型',
+    shortHelp: '指定这条 API 预设要按哪种宿主渠道语义转发。',
+    detailHelp:
+      'OpenAI / 自定义兼容：适合大多数 OpenAI 兼容端点。Claude / Gemini / Mistral / DeepSeek / xAI / Moonshot：会走 SillyTavern 对应的原生 provider 通道。OpenRouter 会按兼容通道发送，并自动补推荐请求头。',
+  },
+  {
     key: 'api_preset.api_url',
     label: 'API URL',
     shortHelp: '自定义API模式下使用的接口地址。',
-    detailHelp: '填写你的自定义 API 基础地址后，可点击“加载模型列表”获取可用模型。',
-    placeholder: 'https://example.com/flow',
+    detailHelp: '请尽量填写基础 API 地址，不要手动拼上 /chat/completions、/messages 或 /models，插件会按渠道自动补全。',
+    placeholder: 'https://api.example.com/v1',
   },
   {
     key: 'api_preset.api_key',
@@ -216,7 +223,7 @@ const FIELD_HELP_LIST: FieldHelpMeta[] = [
     key: 'api_preset.headers_json',
     label: '额外请求头',
     shortHelp: '可附加自定义 HTTP 头（JSON 对象）。',
-    detailHelp: '用于网关鉴权或路由标识。格式错误会在调度前被视为配置异常。',
+    detailHelp: '主要用于自定义兼容渠道与 OpenRouter。Claude / Gemini 这类原生通道不会消费这里的额外请求头。',
     placeholder: '{"X-Token":"value"}',
   },
   {

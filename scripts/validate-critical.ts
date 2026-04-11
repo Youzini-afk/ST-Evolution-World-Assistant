@@ -36,6 +36,13 @@ import {
   resetRuntimeState,
   shouldSkipTavernHelperPromptViewerSyntheticGeneration,
 } from '../src/runtime/state';
+import {
+  buildApiPresetCustomIncludeHeaders,
+  getApiSourceDefinition,
+  normalizeApiBaseUrl,
+  normalizeApiSource,
+  shouldUseGenerateRawCustomApi,
+} from '../src/runtime/api-sources';
 
 function buildSampleSettings() {
   return EwSettingsSchema.parse({
@@ -490,6 +497,57 @@ function validatePromptViewerSyntheticGenerationGuard(): void {
   }
 }
 
+function validateApiSourceCompatibility(): void {
+  assert.equal(normalizeApiSource('mistral'), 'mistralai');
+  assert.equal(normalizeApiSource('anthropic'), 'claude');
+  assert.equal(normalizeApiSource('unknown-provider'), 'openai');
+  assert.equal(
+    normalizeApiBaseUrl('openai', 'https://api.example.com/v1/chat/completions'),
+    'https://api.example.com/v1',
+  );
+  assert.equal(
+    normalizeApiBaseUrl('claude', 'https://api.anthropic.com/v1/messages'),
+    'https://api.anthropic.com/v1',
+  );
+
+  const openRouterHeaders = buildApiPresetCustomIncludeHeaders({
+    api_source: 'openrouter',
+    api_key: 'sk-or-secret',
+    headers_json: '',
+  } as any);
+  assert.match(openRouterHeaders, /Authorization: Bearer sk-or-secret/);
+  assert.match(openRouterHeaders, /HTTP-Referer:/);
+  assert.match(openRouterHeaders, /X-Title:/);
+
+  const aimlapiHeaders = buildApiPresetCustomIncludeHeaders({
+    api_source: 'aimlapi',
+    api_key: 'sk-aiml-secret',
+    headers_json: '',
+  } as any);
+  assert.match(aimlapiHeaders, /Authorization: Bearer sk-aiml-secret/);
+  assert.match(aimlapiHeaders, /HTTP-Referer:/);
+  assert.match(aimlapiHeaders, /X-Title:/);
+
+  assert.equal(
+    shouldUseGenerateRawCustomApi({
+      api_source: 'openrouter',
+      headers_json: '',
+    } as any),
+    false,
+  );
+  assert.equal(
+    shouldUseGenerateRawCustomApi({
+      api_source: 'custom',
+      headers_json: '',
+    } as any),
+    true,
+  );
+
+  assert.equal(getApiSourceDefinition('claude').transport, 'reverse_proxy');
+  assert.equal(getApiSourceDefinition('claude').supportsStProxyModels, true);
+  assert.equal(getApiSourceDefinition('groq').transport, 'custom_headers');
+}
+
 function main(): void {
   validateSharedSettingsSanitization();
   validateExtensionBucketFallback();
@@ -502,6 +560,7 @@ function main(): void {
   validateWorkflowRegexPipeline();
   validateRuntimeTriggerGuards();
   validatePromptViewerSyntheticGenerationGuard();
+  validateApiSourceCompatibility();
   console.log('validate:critical passed');
 }
 

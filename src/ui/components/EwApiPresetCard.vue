@@ -4,7 +4,7 @@
       <div class="ew-api-card__summary">
         <strong class="ew-api-card__name">{{ preset.name || `API配置 ${index + 1}` }}</strong>
         <div class="ew-api-card__chips">
-          <span class="ew-api-card__chip">自定义API</span>
+          <span class="ew-api-card__chip">{{ sourceDefinition.label }}</span>
           <span class="ew-api-card__chip">
             模型 {{ preset.model || '未选' }}
           </span>
@@ -32,11 +32,18 @@
           <EwFieldRow label="预设名称">
             <input :value="preset.name" type="text" @input="setText('name', $event)" />
           </EwFieldRow>
+          <EwFieldRow label="渠道类型">
+            <select :value="normalizedSource" @change="setApiSource">
+              <option v-for="option in apiSourceOptions" :key="option.key" :value="option.key">
+                {{ option.label }}
+              </option>
+            </select>
+          </EwFieldRow>
           <EwFieldRow label="API URL">
             <input
               :value="preset.api_url"
               type="text"
-              placeholder="https://api.example.com/v1/chat/completions"
+              :placeholder="sourceDefinition.placeholder"
               @input="setText('api_url', $event)"
             />
           </EwFieldRow>
@@ -73,6 +80,26 @@
               </button>
             </div>
           </EwFieldRow>
+          <EwFieldRow v-if="sourceDefinition.allowsCustomHeaders" label="额外请求头(JSON)">
+            <textarea
+              :value="preset.headers_json"
+              rows="4"
+              placeholder='{"X-Token":"value"}'
+              @input="setText('headers_json', $event)"
+            />
+          </EwFieldRow>
+        </div>
+
+        <div class="ew-api-card__hint">
+          <strong>渠道说明：</strong>{{ sourceDefinition.note }}
+          <template v-if="normalizedApiUrl">
+            <br />
+            <span>归一化地址：{{ normalizedApiUrl }}</span>
+          </template>
+          <template v-if="!sourceDefinition.allowsCustomHeaders">
+            <br />
+            <span>当前渠道走宿主原生转发，额外请求头不会参与发送。</span>
+          </template>
         </div>
       </div>
     </transition>
@@ -80,6 +107,14 @@
 </template>
 
 <script setup lang="ts">
+import {
+  buildApiPresetCustomIncludeHeaders,
+  buildApiPresetHeaderRecord,
+  EW_API_SOURCE_OPTIONS,
+  getApiSourceDefinition,
+  normalizeApiBaseUrl,
+  normalizeApiSource,
+} from '../../runtime/api-sources';
 import type { EwApiPreset } from '../../runtime/types';
 import EwFieldRow from './EwFieldRow.vue';
 
@@ -99,16 +134,20 @@ const emit = defineEmits<{
 
 const preset = computed(() => props.modelValue);
 const loadingModels = ref(false);
+const apiSourceOptions = EW_API_SOURCE_OPTIONS;
+const normalizedSource = computed(() => normalizeApiSource(preset.value.api_source));
+const sourceDefinition = computed(() => getApiSourceDefinition(preset.value.api_source));
+const normalizedApiUrl = computed(() => normalizeApiBaseUrl(preset.value.api_source, preset.value.api_url));
 const endpointSummary = computed(() => {
-  const endpoint = preset.value.api_url.trim();
+  const endpoint = normalizedApiUrl.value;
   const model = preset.value.model.trim() || '未选模型';
   if (!endpoint && !model) {
     return '未配置';
   }
   if (!endpoint) {
-    return `URL未配置 / ${model}`;
+    return `${sourceDefinition.value.shortLabel} / URL未配置 / ${model}`;
   }
-  const merged = `${endpoint} / ${model}`;
+  const merged = `${sourceDefinition.value.shortLabel} / ${endpoint} / ${model}`;
   return merged.length <= 72 ? merged : `${merged.slice(0, 69)}...`;
 });
 
@@ -124,8 +163,167 @@ function setText(key: 'name' | 'api_url' | 'api_key' | 'model' | 'headers_json',
   patch({ [key]: next } as Partial<EwApiPreset>);
 }
 
+function setApiSource(event: Event) {
+  const nextSource = normalizeApiSource((event.target as HTMLSelectElement).value);
+  patch({
+    api_source: nextSource,
+    model_candidates: [],
+  });
+}
+
+function buildOpenAiLikeModelsUrl(apiurl: string): string {
+  const base = apiurl.replace(/\/+$/, '');
+  return base.endsWith('/models') ? base : `${base}/models`;
+}
+
+function getStHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const g = globalThis as Record<string, any>;
+  if (typeof g.SillyTavern?.getRequestHeaders === 'function') {
+    Object.assign(headers, g.SillyTavern.getRequestHeaders());
+  }
+  headers['Content-Type'] = 'application/json';
+  return headers;
+}
+
+async function loadModelsViaDirect(signal: AbortSignal): Promise<any> {
+  const apiurl = normalizedApiUrl.value;
+  const apiKey = preset.value.api_key.trim();
+  const source = normalizedSource.value;
+  const headers = buildApiPresetHeaderRecord(preset.value);
+  const requestHeaders = Object.fromEntries(
+    Object.entries(headers).filter(([key]) => key.toLowerCase() !== 'content-type'),
+  );
+
+  if (sourceDefinition.value.modelLoadStrategy === 'anthropic_models') {
+    const resp = await fetch(`${apiurl}/models`, {
+      method: 'GET',
+      headers: requestHeaders,
+      signal,
+    });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    }
+    return await resp.json();
+  }
+
+  if (sourceDefinition.value.modelLoadStrategy === 'makersuite_models') {
+    if (!apiKey) {
+      throw new Error('Google AI Studio 渠道需要先填写 API Key 才能加载模型列表。');
+    }
+    const apiVersion = 'v1beta';
+    const resp = await fetch(`${apiurl}/${apiVersion}/models?key=${encodeURIComponent(apiKey)}`, {
+      method: 'GET',
+      signal,
+    });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    }
+    return await resp.json();
+  }
+
+  if (sourceDefinition.value.modelLoadStrategy === 'xai_models') {
+    const resp = await fetch(`${apiurl}/language-models`, {
+      method: 'GET',
+      headers: requestHeaders,
+      signal,
+    });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    }
+    return await resp.json();
+  }
+
+  const resp = await fetch(buildOpenAiLikeModelsUrl(apiurl), {
+    method: 'GET',
+    headers: requestHeaders,
+    signal,
+  });
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+  }
+  return await resp.json();
+}
+
+async function loadModelsViaStProxy(signal: AbortSignal): Promise<any> {
+  const apiurl = normalizedApiUrl.value;
+  const definition = sourceDefinition.value;
+  const stHeaders = getStHeaders();
+
+  if (definition.transport === 'custom_headers') {
+    const proxyResp = await fetch('/api/backends/chat-completions/models', {
+      method: 'POST',
+      headers: stHeaders,
+      body: JSON.stringify({
+        chat_completion_source: 'custom',
+        custom_url: apiurl,
+        custom_include_headers: buildApiPresetCustomIncludeHeaders(preset.value),
+        reverse_proxy: apiurl,
+        proxy_password: '',
+      }),
+      signal,
+    });
+
+    if (!proxyResp.ok) {
+      throw new Error(`酒馆代理返回 HTTP ${proxyResp.status}`);
+    }
+    return await proxyResp.json();
+  }
+
+  if (definition.supportsStProxyModels) {
+    const proxyResp = await fetch('/api/backends/chat-completions/models', {
+      method: 'POST',
+      headers: stHeaders,
+      body: JSON.stringify({
+        chat_completion_source: definition.backendSource,
+        reverse_proxy: apiurl,
+        proxy_password: preset.value.api_key.trim(),
+      }),
+      signal,
+    });
+
+    if (!proxyResp.ok) {
+      throw new Error(`酒馆代理返回 HTTP ${proxyResp.status}`);
+    }
+    return await proxyResp.json();
+  }
+
+  throw new Error('该渠道暂不支持通过酒馆代理自动读取模型列表，请手动填写模型名。');
+}
+
+function normalizeModelListPayload(payload: any): string[] {
+  if (normalizedSource.value === 'makersuite' && Array.isArray(payload?.models)) {
+    return payload.models
+      .map((item: any) => String(item?.name ?? item?.id ?? ''))
+      .map((name: string) => name.replace(/^models\//, '').trim())
+      .filter(Boolean);
+  }
+
+  if (normalizedSource.value === 'xai' && Array.isArray(payload?.models)) {
+    return payload.models.map((item: any) => String(item?.id ?? item?.name ?? '')).filter(Boolean);
+  }
+
+  if (Array.isArray(payload?.data?.models)) {
+    return payload.data.models.map((item: any) => String(item?.id ?? item?.name ?? '')).filter(Boolean);
+  }
+
+  if (Array.isArray(payload?.data)) {
+    return payload.data.map((item: any) => String(item?.id ?? item?.name ?? item)).filter(Boolean);
+  }
+
+  if (Array.isArray(payload?.models)) {
+    return payload.models.map((item: any) => String(item?.id ?? item?.name ?? item)).filter(Boolean);
+  }
+
+  if (Array.isArray(payload)) {
+    return payload.map((item: any) => (typeof item === 'string' ? item : String(item?.id ?? item?.name ?? ''))).filter(Boolean);
+  }
+
+  return [];
+}
+
 async function loadModels() {
-  const apiurl = preset.value.api_url.trim();
+  const apiurl = normalizedApiUrl.value;
   if (!apiurl) {
     toastr.warning('请先填写 API URL', 'Evolution World');
     return;
@@ -136,113 +334,22 @@ async function loadModels() {
   const timeout = setTimeout(() => controller.abort(), 15_000);
 
   try {
-    // 构建 models 端点 URL
-    const base = apiurl.replace(/\/+$/, '');
-    const modelsUrl = base.endsWith('/models') ? base : `${base}/models`;
-
-    // 构建请求头
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    const headersJson = preset.value.headers_json?.trim();
-    if (headersJson) {
-      try {
-        const custom = JSON.parse(headersJson);
-        if (custom && typeof custom === 'object') {
-          Object.assign(headers, custom);
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-    const apiKey = preset.value.api_key.trim();
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`;
-    }
-
     let json: any;
 
-    // 策略1: 直接从浏览器 fetch（适用于公网 API）
     try {
-      const resp = await fetch(modelsUrl, {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-      });
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-      }
-      json = await resp.json();
+      json = await loadModelsViaDirect(controller.signal);
     } catch (directError) {
-      // 策略2: 通过 ST 后端代理（适用于本地端口、CORS 限制的 API）
       console.info(
         `[EW] Direct model fetch failed (${directError instanceof Error ? directError.message : directError}), trying ST backend proxy…`,
       );
-
-      // 获取 ST 请求头
-      const stHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-      const g = globalThis as Record<string, any>;
-      if (typeof g.SillyTavern?.getRequestHeaders === 'function') {
-        Object.assign(stHeaders, g.SillyTavern.getRequestHeaders());
-      }
-      stHeaders['Content-Type'] = 'application/json';
-
-      // 构建 custom_include_headers（将用户的 API key 和自定义头传给 ST 后端）
-      const includeHeaders = Object.entries(headers)
-        .filter(([k]) => k.toLowerCase() !== 'content-type')
-        .map(([k, v]) => `${k}: ${v}`)
-        .join('\n');
-
-      // 通过 ST 后端代理发送请求
-      // 使用 chat-completions/generate 端点 + 特殊的 model_list 模式
-      // ST 后端会将请求转发到 custom_url
-      const proxyResp = await fetch('/api/backends/chat-completions/models', {
-        method: 'POST',
-        headers: stHeaders,
-        body: JSON.stringify({
-          chat_completion_source: 'custom',
-          custom_url: modelsUrl,
-          custom_include_headers: includeHeaders,
-          reverse_proxy: modelsUrl,
-          proxy_password: '',
-        }),
-        signal: controller.signal,
-      });
-
-      if (proxyResp.ok) {
-        json = await proxyResp.json();
-      } else {
-        // 策略3: 通用 OpenAI 模型列表端点
-        const openaiProxyResp = await fetch('/api/backends/chat-completions/models', {
-          method: 'POST',
-          headers: stHeaders,
-          body: JSON.stringify({
-            chat_completion_source: 'openai',
-            reverse_proxy: apiurl,
-            proxy_password: apiKey,
-          }),
-          signal: controller.signal,
-        });
-        if (!openaiProxyResp.ok) {
-          throw new Error(
-            `本地端口加载失败。请确认: 1) API 服务已启动 2) URL 正确 (当前: ${modelsUrl})`,
-          );
-        }
-        json = await openaiProxyResp.json();
-      }
+      json = await loadModelsViaStProxy(controller.signal);
     }
 
-    // 解析响应：支持多种格式
-    let rawList: string[];
-    if (Array.isArray(json?.data)) {
-      rawList = json.data.map((m: any) => String(m.id ?? m.name ?? '')).filter(Boolean);
-    } else if (Array.isArray(json)) {
-      rawList = json.map((m: any) => (typeof m === 'string' ? m : String(m.id ?? m.name ?? ''))).filter(Boolean);
-    } else {
-      rawList = [];
-    }
-
+    const rawList = normalizeModelListPayload(json);
     const deduped = Array.from(new Set(rawList.map(item => item.trim()).filter(Boolean)));
+    if (deduped.length === 0) {
+      throw new Error('接口返回成功，但没有解析到任何模型。你可以手动填写模型名继续使用。');
+    }
     const current = preset.value.model.trim();
     const model_candidates = current && !deduped.includes(current) ? [current, ...deduped] : deduped;
     patch({

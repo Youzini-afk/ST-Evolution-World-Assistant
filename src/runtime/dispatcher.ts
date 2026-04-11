@@ -2,6 +2,13 @@ import { buildFlowRequest } from './context-builder';
 import { FlowRequestV1, FlowResponseSchema, FlowTriggerV1 } from './contracts';
 import { assembleOrderedPrompts, collectPromptComponents, PromptComponents } from './prompt-assembler';
 import {
+  buildApiPresetCustomIncludeHeaders,
+  getApiSourceDefinition,
+  normalizeApiBaseUrl,
+  normalizeApiSource,
+  shouldUseGenerateRawCustomApi,
+} from './api-sources';
+import {
   buildJsonObjectStructuredSchema,
   buildStructuredOutputRequestAugment,
   isJsonObjectStructuredOutputMode,
@@ -213,41 +220,6 @@ function summarizeStBackendError(flowId: string, status: number, apiUrl: string,
   return `[${flowId}] ST backend error: ${status} ${compact}`;
 }
 
-function parseHeadersJson(headersJson: string): Record<string, string> {
-  const trimmed = headersJson.trim();
-  if (!trimmed) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('headers_json must be a JSON object');
-    }
-
-    return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [String(key), String(value)]));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`headers_json invalid: ${message}`);
-  }
-}
-
-function buildCustomIncludeHeaders(apiPreset: EwApiPreset): string {
-  const headers = parseHeadersJson(apiPreset.headers_json);
-
-  if (apiPreset.api_key.trim()) {
-    headers.Authorization = `Bearer ${apiPreset.api_key.trim()}`;
-  }
-
-  return Object.entries(headers)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join('\n');
-}
-
-function shouldUseGenerateRawCustomApi(apiPreset: EwApiPreset): boolean {
-  return !apiPreset.headers_json.trim();
-}
-
 function resolveCurrentChatCompletionModel(context: Record<string, any> | undefined): string {
   const getChatCompletionModel = context?.getChatCompletionModel;
   if (typeof getChatCompletionModel === 'function') {
@@ -311,9 +283,12 @@ function buildMainApiStBackendRequestBody(
     return null;
   }
 
+  const chatCompletionSource = String(chatSettings.chat_completion_source ?? 'openai')
+    .trim()
+    .toLowerCase() || 'openai';
   const structuredOutput = buildStructuredOutputRequestAugment(
     flow.behavior_options.structured_output,
-    String(chatSettings.chat_completion_source ?? 'openai'),
+    chatCompletionSource,
     String(chatSettings.custom_include_body ?? ''),
   );
 
@@ -326,7 +301,7 @@ function buildMainApiStBackendRequestBody(
     frequency_penalty: flow.generation_options.frequency_penalty,
     presence_penalty: flow.generation_options.presence_penalty,
     stream: flow.generation_options.stream,
-    chat_completion_source: String(chatSettings.chat_completion_source ?? 'openai'),
+    chat_completion_source: chatCompletionSource,
     group_names: [],
     include_reasoning: flow.behavior_options.request_thinking,
     reasoning_effort: flow.behavior_options.reasoning_effort,
@@ -358,18 +333,20 @@ function buildMainApiStBackendRequestBody(
   };
 }
 
-function buildCustomStBackendRequestBody(
+function buildPresetStBackendRequestBody(
   flow: EwFlowConfig,
   apiPreset: EwApiPreset,
   orderedPrompts: Array<{ role: 'system' | 'assistant' | 'user'; content: string }>,
 ): Record<string, any> {
+  const definition = getApiSourceDefinition(apiPreset.api_source);
+  const normalizedApiUrl = normalizeApiBaseUrl(apiPreset.api_source, apiPreset.api_url);
   const structuredOutput = buildStructuredOutputRequestAugment(
     flow.behavior_options.structured_output,
-    'custom',
+    definition.backendSource,
     '',
   );
 
-  return {
+  const requestBody: Record<string, any> = {
     messages: orderedPrompts,
     model: apiPreset.model.trim().replace(/^models\//, ''),
     max_tokens: flow.generation_options.max_reply_tokens,
@@ -378,18 +355,12 @@ function buildCustomStBackendRequestBody(
     frequency_penalty: flow.generation_options.frequency_penalty,
     presence_penalty: flow.generation_options.presence_penalty,
     stream: flow.generation_options.stream,
-    chat_completion_source: 'custom',
+    chat_completion_source: definition.backendSource,
     group_names: [],
     include_reasoning: flow.behavior_options.request_thinking,
     reasoning_effort: flow.behavior_options.reasoning_effort,
     enable_web_search: false,
     request_images: flow.behavior_options.send_inline_media,
-    reverse_proxy: apiPreset.api_url.trim(),
-    proxy_password: '',
-    custom_url: apiPreset.api_url.trim(),
-    custom_include_headers: buildCustomIncludeHeaders(apiPreset),
-    custom_include_body: structuredOutput.customIncludeBody ?? '',
-    custom_prompt_post_processing: 'strict',
     ...(structuredOutput.jsonSchema ? { json_schema: structuredOutput.jsonSchema } : {}),
     ...(structuredOutput.transportMode !== 'off'
       ? {
@@ -401,6 +372,20 @@ function buildCustomStBackendRequestBody(
         }
       : {}),
   };
+
+  if (definition.transport === 'custom_headers') {
+    requestBody.reverse_proxy = normalizedApiUrl;
+    requestBody.proxy_password = '';
+    requestBody.custom_url = normalizedApiUrl;
+    requestBody.custom_include_headers = buildApiPresetCustomIncludeHeaders(apiPreset);
+    requestBody.custom_include_body = structuredOutput.customIncludeBody ?? '';
+    requestBody.custom_prompt_post_processing = 'strict';
+  } else {
+    requestBody.reverse_proxy = normalizedApiUrl;
+    requestBody.proxy_password = apiPreset.api_key.trim();
+  }
+
+  return requestBody;
 }
 
 function extractLatestJsonStringField(source: string, fieldName: string): { raw: string; index: number } | null {
@@ -647,11 +632,12 @@ function buildGenerateRawCustomApi(
   presence_penalty?: 'same_as_preset' | 'unset' | number;
   top_p?: 'same_as_preset' | 'unset' | number;
 } {
+  const definition = getApiSourceDefinition(apiPreset.api_source);
   return {
-    apiurl: apiPreset.api_url.trim(),
+    apiurl: normalizeApiBaseUrl(apiPreset.api_source, apiPreset.api_url),
     key: apiPreset.api_key.trim() || undefined,
     model: apiPreset.model.trim().replace(/^models\//, ''),
-    source: apiPreset.api_source?.trim() || 'openai',
+    source: definition.generateRawSource ?? 'openai',
     max_tokens: flow.generation_options.max_reply_tokens,
     temperature: flow.generation_options.temperature,
     frequency_penalty: flow.generation_options.frequency_penalty,
@@ -830,7 +816,7 @@ function resolveApiPreset(settings: EwSettings, flow: EwFlowConfig): EwApiPreset
       api_url: flow.api_url,
       api_key: flow.api_key,
       model: '',
-      api_source: 'openai',
+      api_source: normalizeApiSource('openai'),
       model_candidates: [],
       headers_json: flow.headers_json,
     };
@@ -1073,7 +1059,8 @@ async function executeFlowViaStBackend(
   abortSignal?: AbortSignal,
   isCancelled?: () => boolean,
 ): Promise<NonNullable<DispatchFlowAttempt['response']>> {
-  if (!apiPreset.api_url.trim()) {
+  const normalizedApiUrl = normalizeApiBaseUrl(apiPreset.api_source, apiPreset.api_url);
+  if (!normalizedApiUrl) {
     throw new Error(`[${flow.id}] custom api_url is empty`);
   }
   if (!apiPreset.model.trim()) {
@@ -1082,8 +1069,8 @@ async function executeFlowViaStBackend(
 
   return executeFlowViaChatCompletionsBackend(
     flow,
-    buildCustomStBackendRequestBody(flow, apiPreset, orderedPrompts),
-    apiPreset.api_url.trim(),
+    buildPresetStBackendRequestBody(flow, apiPreset, orderedPrompts),
+    normalizedApiUrl,
     onStreamText,
     abortSignal,
     isCancelled,
@@ -1127,7 +1114,7 @@ async function executeFlow(
   throwIfDispatchAborted(abortSignal, isCancelled);
   const apiPreset = resolveApiPreset(settings, flow);
   const usesTavernMain = apiPreset.mode === 'llm_connector' || apiPreset.use_main_api;
-  const attemptApiUrl = usesTavernMain ? 'tavern://main_api' : apiPreset.api_url;
+  const attemptApiUrl = usesTavernMain ? 'tavern://main_api' : normalizeApiBaseUrl(apiPreset.api_source, apiPreset.api_url);
   const generationId = `${requestId}:${flow.id}`;
   const streamEnabled = flow.generation_options.stream;
   const structuredOutputEnabled = isJsonObjectStructuredOutputMode(flow.behavior_options.structured_output);
@@ -1208,6 +1195,7 @@ async function executeFlow(
         : null;
     const shouldUseGenerateRawCustomRoute =
       !structuredOutputEnabled && shouldUseGenerateRawCustomApi(apiPreset);
+    const apiSourceLabel = usesTavernMain ? 'main_api' : getApiSourceDefinition(apiPreset.api_source).shortLabel;
     const requestDebugBase = {
       route: usesTavernMain
         ? mainApiStreamBridgeRequest
@@ -1220,6 +1208,7 @@ async function executeFlow(
             ? '/api/backends/chat-completions/generate (custom_api stream bridge)'
             : 'generateRaw(custom_api)'
           : '/api/backends/chat-completions/generate',
+      api_source: apiSourceLabel,
       flow_request: request,
       assembled_messages: orderedPrompts,
       ...(structuredOutputEnabled
@@ -1266,7 +1255,7 @@ async function executeFlow(
       }
     } else if (shouldUseGenerateRawCustomRoute) {
       if (streamEnabled) {
-        const streamBridgeRequest = buildCustomStBackendRequestBody(flow, apiPreset, orderedPrompts);
+        const streamBridgeRequest = buildPresetStBackendRequestBody(flow, apiPreset, orderedPrompts);
         requestDebug = {
           ...requestDebugBase,
           transport_request: streamBridgeRequest,
@@ -1304,7 +1293,7 @@ async function executeFlow(
           console.warn(
             `[EW] Flow "${flow.id}": generateRaw.custom_api failed, fallback to ST backend — ${toErrorMessage(error)}`,
           );
-          const fallbackRequestBody = buildCustomStBackendRequestBody(flow, apiPreset, orderedPrompts);
+          const fallbackRequestBody = buildPresetStBackendRequestBody(flow, apiPreset, orderedPrompts);
           requestDebug = {
             ...requestDebugBase,
             route: '/api/backends/chat-completions/generate (fallback)',
@@ -1321,7 +1310,7 @@ async function executeFlow(
         }
       }
     } else {
-      const stBackendRequest = buildCustomStBackendRequestBody(flow, apiPreset, orderedPrompts);
+      const stBackendRequest = buildPresetStBackendRequestBody(flow, apiPreset, orderedPrompts);
       requestDebug = {
         ...requestDebugBase,
         transport_request: stBackendRequest,
