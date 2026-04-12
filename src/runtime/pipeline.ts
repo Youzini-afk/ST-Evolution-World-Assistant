@@ -13,6 +13,8 @@ import {
   CommitSummary,
   ContextCursor,
   ControllerTemplateSlot,
+  EwFlowConfig,
+  EwFlowConfigSchema,
   WorkflowFailure,
   DispatchFlowAttempt,
   DispatchFlowResult,
@@ -38,6 +40,7 @@ type RunWorkflowInput = {
   mode: "auto" | "manual";
   inject_reply?: boolean;
   flow_ids?: string[];
+  selected_flows?: EwFlowConfig[];
   timing_filter?: "before_reply" | "after_reply";
   preserved_results?: DispatchFlowResult[];
   job_type?: WorkflowJobType;
@@ -302,13 +305,27 @@ export async function runWorkflow(
       request_id: requestId,
       message: "正在准备工作流上下文…",
     });
-    // Merge global flows + per-character flows (from EW/Flows worldbook entry).
-    const allEnabledFlows = await getEffectiveFlows(settings);
-    const selectedFlowIds = new Set((input.flow_ids ?? []).filter(Boolean));
-    let enabledFlows =
-      selectedFlowIds.size > 0
-        ? allEnabledFlows.filter((flow) => selectedFlowIds.has(flow.id))
-        : allEnabledFlows;
+    const explicitFlows = Array.isArray(input.selected_flows)
+      ? input.selected_flows
+          .filter(
+            (flow): flow is EwFlowConfig =>
+              Boolean(flow && typeof flow === "object"),
+          )
+          .map((flow) => EwFlowConfigSchema.parse(flow))
+      : [];
+
+    let enabledFlows: EwFlowConfig[];
+    if (explicitFlows.length > 0) {
+      enabledFlows = explicitFlows;
+    } else {
+      // Merge global flows + per-character flows (from EW/Flows worldbook entry).
+      const allEnabledFlows = await getEffectiveFlows(settings);
+      const selectedFlowIds = new Set((input.flow_ids ?? []).filter(Boolean));
+      enabledFlows =
+        selectedFlowIds.size > 0
+          ? allEnabledFlows.filter((flow) => selectedFlowIds.has(flow.id))
+          : allEnabledFlows;
+    }
 
     // Per-flow timing filter: resolve 'default' to global workflow_timing, then keep only matching.
     if (input.timing_filter) {

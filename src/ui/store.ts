@@ -64,6 +64,7 @@ export const useEwStore = defineStore('evolution-world-store', () => {
   const expandedFlowId = ref<string | null>(null);
   const importText = ref('');
   const busy = ref(false);
+  const executingFlowId = ref<string | null>(null);
 
   // ── 角色卡绑定工作流 ──
   const charFlows = ref<EwFlowConfig[]>([]);
@@ -404,6 +405,36 @@ export const useEwStore = defineStore('evolution-world-store', () => {
       }
     } finally {
       refreshDebugRecords({ silent: true });
+      busy.value = false;
+    }
+  }
+
+  async function runSingleFlow(flow: EwFlowConfig) {
+    const targetFlow = EwFlowConfigSchema.parse({
+      ...klona(flow),
+      enabled: true,
+    });
+    const displayName = targetFlow.name.trim() || targetFlow.id;
+
+    busy.value = true;
+    executingFlowId.value = targetFlow.id;
+    try {
+      const input = getChatMessages(-1)[0]?.message || '';
+      const result = await runWorkflow({
+        message_id: getLastMessageId(),
+        user_input: input,
+        mode: 'manual',
+        inject_reply: false,
+        selected_flows: [targetFlow],
+      });
+      if (!result.ok) {
+        toastr.error(result.reason ?? `工作流「${displayName}」执行失败`, 'Evolution World');
+      } else {
+        toastr.success(`工作流「${displayName}」执行成功`, 'Evolution World');
+      }
+    } finally {
+      refreshDebugRecords({ silent: true });
+      executingFlowId.value = null;
       busy.value = false;
     }
   }
@@ -1060,6 +1091,7 @@ export const useEwStore = defineStore('evolution-world-store', () => {
     expandedFlowId,
     importText,
     busy,
+    executingFlowId,
     charFlows,
     activeCharName,
     flowScope,
@@ -1078,6 +1110,7 @@ export const useEwStore = defineStore('evolution-world-store', () => {
     setExpandedApiPreset,
     setExpandedFlow,
     runManual,
+    runSingleFlow,
     rollbackController,
     exportConfig,
     importConfig,

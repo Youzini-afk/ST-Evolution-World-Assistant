@@ -30,6 +30,15 @@
           </button>
           <span class="ew-toggle-item__label">启用</span>
         </div>
+        <button
+          type="button"
+          class="ew-flow-card__action ew-flow-card__action--primary"
+          :disabled="busy"
+          :title="flow.enabled ? '手动执行当前工作流' : '手动执行当前工作流（即使当前为停用）'"
+          @click="$emit('execute')"
+        >
+          {{ executing ? '执行中…' : '执行' }}
+        </button>
         <button type="button" class="ew-flow-card__action" @click="$emit('toggle-expand')">
           {{ expanded ? '收起' : '编辑' }}
         </button>
@@ -902,9 +911,17 @@ type BehaviorBoolKey =
   | 'request_thinking';
 type BehaviorSelectKey = 'name_behavior' | 'reasoning_effort' | 'verbosity' | 'structured_output';
 
-const props = defineProps<{ modelValue: EwFlowConfig; apiPresets: EwApiPreset[]; index: number; expanded: boolean }>();
+const props = defineProps<{
+  modelValue: EwFlowConfig;
+  apiPresets: EwApiPreset[];
+  index: number;
+  expanded: boolean;
+  busy: boolean;
+  executing: boolean;
+}>();
 const emit = defineEmits<{
   (event: 'toggle-expand'): void;
+  (event: 'execute'): void;
   (event: 'duplicate'): void;
   (event: 'remove'): void;
   (event: 'export'): void;
@@ -1533,6 +1550,28 @@ function openRegexPreview() {
   transform: translateY(-1px);
   box-shadow: 0 4px 12px var(--ew-accent-glow);
   outline: none;
+}
+
+.ew-flow-card__action--primary {
+  border-color: color-mix(in srgb, var(--ew-success) 40%, transparent);
+  background: color-mix(in srgb, var(--ew-success) 14%, transparent);
+  color: color-mix(in srgb, var(--ew-success) 92%, #fff);
+}
+
+.ew-flow-card__action--primary:hover,
+.ew-flow-card__action--primary:focus-visible {
+  border-color: var(--ew-success);
+  background: color-mix(in srgb, var(--ew-success) 26%, transparent);
+  color: #fff;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--ew-success) 28%, transparent);
+}
+
+.ew-flow-card__action[disabled] {
+  opacity: 0.56;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none;
+  box-shadow: none;
 }
 
 .ew-flow-card__action--danger {
