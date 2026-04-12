@@ -43,13 +43,14 @@ import {
   EwSettingsSchema,
   LastIoSummary,
   RunSummary,
+  WorkflowProgressUpdate,
   type ControllerEntrySnapshot,
   type DynSnapshot,
 } from '../runtime/types';
 import { getCurrentChatIdSafe as getHostCurrentChatIdSafe } from '../st-adapter';
 import { convertStPresetToFlow, isSillyTavernPreset } from './convertStPreset';
 import type { TabKey } from './help-meta';
-import { showEwNotice } from './notice';
+import { showEwNotice, showManagedWorkflowNotice, type EwWorkflowNoticeInput } from './notice';
 import { defineStore } from 'pinia';
 import { klona } from 'klona';
 import { onScopeDispose, ref, watch } from 'vue';
@@ -388,6 +389,106 @@ export const useEwStore = defineStore('evolution-world-store', () => {
     expandedFlowId.value = flowId;
   }
 
+  function createManualFlowNotice(displayName: string, onAbort: (() => void) | null) {
+    let state: EwWorkflowNoticeInput = {
+      title: 'Evolution World',
+      message: `正在手动执行工作流「${displayName}」…`,
+      level: 'info',
+      persist: true,
+      busy: true,
+      collapse_after_ms: 4200,
+      workflow_name: displayName,
+      flow_progress: { completed: 0, total: 1, failed: 0 },
+      action: onAbort
+        ? {
+            label: '终止执行',
+            onClick: onAbort,
+            kind: 'danger',
+          }
+        : undefined,
+    };
+    const handle = showManagedWorkflowNotice(state);
+
+    const update = (patch: Partial<EwWorkflowNoticeInput>) => {
+      state = {
+        ...state,
+        ...patch,
+        action: Object.prototype.hasOwnProperty.call(patch, 'action') ? patch.action : state.action,
+        flow_progress: Object.prototype.hasOwnProperty.call(patch, 'flow_progress')
+          ? patch.flow_progress
+          : state.flow_progress,
+        island: Object.prototype.hasOwnProperty.call(patch, 'island') ? patch.island : state.island,
+      };
+      handle.update(state);
+    };
+
+    return {
+      update,
+      dismiss: handle.dismiss,
+    };
+  }
+
+  function updateManualFlowNoticeProgress(
+    notice: ReturnType<typeof createManualFlowNotice>,
+    displayName: string,
+    progress: WorkflowProgressUpdate,
+  ) {
+    if (progress.phase === 'failed' || progress.phase === 'completed') {
+      return;
+    }
+
+    const workflowName = progress.flow_name?.trim() || displayName;
+    const message = progress.message?.trim() || `正在执行工作流「${workflowName}」…`;
+    const previewEntryName = progress.stream_preview?.entry_name?.trim() || workflowName;
+    const previewContent = progress.stream_preview?.content?.trim() || progress.stream_text?.trim() || '';
+
+    notice.update({
+      title: 'Evolution World',
+      workflow_name: workflowName,
+      message,
+      level: 'info',
+      persist: true,
+      busy: true,
+      collapse_after_ms: 4200,
+      flow_progress: { completed: 0, total: 1, failed: 0 },
+      island: previewContent
+        ? {
+            entry_name: previewEntryName,
+            content: previewContent,
+            extra_count: 0,
+          }
+        : undefined,
+    });
+  }
+
+  function resolveLatestRunSummaryForCurrentChat(): RunSummary | null {
+    const currentChatId = getCurrentChatIdSafe();
+    return currentChatId ? loadLastRunForChat(currentChatId) : loadLastRun();
+  }
+
+  function buildManualFlowOutcomeMessage(displayName: string, summary: RunSummary | null, fallback: string) {
+    const targetWorldbook = summary?.target_worldbook_name?.trim();
+    const warning = summary?.warning;
+
+    if (warning) {
+      const base = warning.summary?.trim() || warning.detail?.trim() || fallback;
+      return targetWorldbook ? `${base}\n目标世界书：${targetWorldbook}` : base;
+    }
+
+    if (summary?.ok) {
+      if (targetWorldbook) {
+        return `工作流「${displayName}」执行完成，已写入世界书「${targetWorldbook}」。`;
+      }
+      return fallback;
+    }
+
+    const failureReason = summary?.failure?.summary?.trim() || summary?.reason?.trim();
+    if (!failureReason) {
+      return fallback;
+    }
+    return targetWorldbook ? `${failureReason}\n目标世界书：${targetWorldbook}` : failureReason;
+  }
+
   async function runManual(message: string) {
     busy.value = true;
     try {
@@ -416,7 +517,34 @@ export const useEwStore = defineStore('evolution-world-store', () => {
     });
     const displayName = targetFlow.name.trim() || targetFlow.id;
 
-    busy.value = true;
+    if (busy.value) {
+      showEwNotice({
+        title: '手动执行已阻止',
+        message: '当前面板还有其他任务正在执行，请等待当前任务完成后再手动执行工作流。',
+        level: 'warning',
+        duration_ms: 3600,
+      });
+      toastr.warning('当前还有其他任务正在执行', 'Evolution World');
+      return;
+    }
+
+    if (executingFlowId.value) {
+      const runningName =
+        settings.value.flows.find(item => item.id === executingFlowId.value)?.name?.trim() ||
+        charFlows.value.find(item => item.id === executingFlowId.value)?.name?.trim() ||
+        executingFlowId.value;
+      showEwNotice({
+        title: '手动执行已阻止',
+        message: `工作流「${runningName}」仍在执行中，请等待本轮执行结束后再发起新的手动执行。`,
+        level: 'warning',
+        duration_ms: 3600,
+      });
+      toastr.warning('已有工作流正在执行', 'Evolution World');
+      return;
+    }
+
+    const abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const notice = createManualFlowNotice(displayName, abortController ? () => abortController.abort() : null);
     executingFlowId.value = targetFlow.id;
     try {
       const input = getChatMessages(-1)[0]?.message || '';
@@ -426,16 +554,83 @@ export const useEwStore = defineStore('evolution-world-store', () => {
         mode: 'manual',
         inject_reply: false,
         selected_flows: [targetFlow],
+        abortSignal: abortController?.signal,
+        isCancelled: () => abortController?.signal.aborted ?? false,
+        onProgress: progress => updateManualFlowNoticeProgress(notice, displayName, progress),
       });
+      const latestSummary = resolveLatestRunSummaryForCurrentChat();
+
       if (!result.ok) {
-        toastr.error(result.reason ?? `工作流「${displayName}」执行失败`, 'Evolution World');
+        const isCancelled =
+          Boolean(abortController?.signal.aborted) ||
+          latestSummary?.reason?.includes('cancel') ||
+          latestSummary?.reason?.includes('终止');
+        const message = buildManualFlowOutcomeMessage(
+          displayName,
+          latestSummary,
+          isCancelled ? `工作流「${displayName}」已终止。` : `工作流「${displayName}」执行失败。`,
+        );
+
+        notice.update({
+          title: isCancelled ? '工作流已终止' : '工作流执行失败',
+          message,
+          level: isCancelled ? 'warning' : 'error',
+          persist: false,
+          busy: false,
+          action: undefined,
+          collapse_after_ms: 0,
+          duration_ms: isCancelled ? 3600 : 4800,
+          flow_progress: { completed: 0, total: 1, failed: 1 },
+          island: undefined,
+        });
+        if (isCancelled) {
+          toastr.warning(message.replace(/\n/g, ' '), 'Evolution World');
+        } else {
+          toastr.error(message.replace(/\n/g, ' '), 'Evolution World');
+        }
       } else {
-        toastr.success(`工作流「${displayName}」执行成功`, 'Evolution World');
+        const isWarning = Boolean(latestSummary?.warning);
+        const message = buildManualFlowOutcomeMessage(
+          displayName,
+          latestSummary,
+          `工作流「${displayName}」执行成功。`,
+        );
+
+        notice.update({
+          title: isWarning ? '工作流执行完成（带警告）' : '工作流执行成功',
+          message,
+          level: isWarning ? 'warning' : 'success',
+          persist: false,
+          busy: false,
+          action: undefined,
+          collapse_after_ms: 0,
+          duration_ms: isWarning ? 4400 : 3800,
+          flow_progress: { completed: 1, total: 1, failed: 0 },
+        });
+        if (isWarning) {
+          toastr.warning(message.replace(/\n/g, ' '), 'Evolution World');
+        } else {
+          toastr.success(message.replace(/\n/g, ' '), 'Evolution World');
+        }
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notice.update({
+        title: '工作流执行失败',
+        message: `工作流「${displayName}」执行异常：${message}`,
+        level: 'error',
+        persist: false,
+        busy: false,
+        action: undefined,
+        collapse_after_ms: 0,
+        duration_ms: 4800,
+        flow_progress: { completed: 0, total: 1, failed: 1 },
+        island: undefined,
+      });
+      toastr.error(`工作流「${displayName}」执行异常：${message}`, 'Evolution World');
     } finally {
       refreshDebugRecords({ silent: true });
       executingFlowId.value = null;
-      busy.value = false;
     }
   }
 

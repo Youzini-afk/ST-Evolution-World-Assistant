@@ -459,12 +459,12 @@
                   <EwFlowCard
                     v-for="(flow, index) in store.settings.flows"
                     :key="flow.id"
-                    v-memo="[flow, store.expandedFlowId === flow.id, store.settings.api_presets, store.busy, store.executingFlowId === flow.id]"
+                    v-memo="[flow, store.expandedFlowId === flow.id, store.settings.api_presets, store.busy, store.executingFlowId !== null, store.executingFlowId === flow.id]"
                     :index="index"
                     :model-value="flow"
                     :api-presets="store.settings.api_presets"
                     :expanded="store.expandedFlowId === flow.id"
-                    :busy="store.busy"
+                    :busy="store.busy || store.executingFlowId !== null"
                     :executing="store.executingFlowId === flow.id"
                     @toggle-expand="store.toggleFlowExpanded(flow.id)"
                     @execute="store.runSingleFlow(flow)"
@@ -515,12 +515,12 @@
                   <EwFlowCard
                     v-for="(flow, index) in store.charFlows"
                     :key="flow.id"
-                    v-memo="[flow, store.expandedFlowId === flow.id, store.settings.api_presets, store.busy, store.executingFlowId === flow.id]"
+                    v-memo="[flow, store.expandedFlowId === flow.id, store.settings.api_presets, store.busy, store.executingFlowId !== null, store.executingFlowId === flow.id]"
                     :index="index"
                     :model-value="flow"
                     :api-presets="store.settings.api_presets"
                     :expanded="store.expandedFlowId === flow.id"
-                    :busy="store.busy"
+                    :busy="store.busy || store.executingFlowId !== null"
                     :executing="store.executingFlowId === flow.id"
                     @toggle-expand="store.toggleFlowExpanded(flow.id)"
                     @execute="store.runSingleFlow(flow)"
@@ -788,7 +788,12 @@ function emitFabChanged() {
 
 const enabledFlowCount = computed(() => store.settings.flows.filter(flow => flow.enabled).length);
 const canRerollCurrentFloor = computed(() => {
-  return store.settings.enabled && store.settings.workflow_timing === 'after_reply' && !store.busy;
+  return (
+    store.settings.enabled &&
+    store.settings.workflow_timing === 'after_reply' &&
+    !store.busy &&
+    store.executingFlowId === null
+  );
 });
 const rerollButtonText = computed(() => {
   switch (store.settings.reroll_scope) {
@@ -804,6 +809,9 @@ const rerollButtonText = computed(() => {
 const rerollButtonTitle = computed(() => {
   if (store.busy) {
     return '当前有任务正在执行';
+  }
+  if (store.executingFlowId) {
+    return '当前有工作流正在手动执行';
   }
   if (!store.settings.enabled) {
     return '请先开启 Evolution World';
