@@ -41,7 +41,14 @@ export type MessageVersionInfo = {
 };
 
 export function resolveMessageTextForVersioning(message: any): string {
-  const candidates = [message?.mes, message?.message, message?.text];
+  const candidates = [
+    message?.raw?.mes,
+    message?.mes,
+    message?.raw?.message,
+    message?.text,
+    message?.message,
+    message?.raw?.extra?.display_text,
+  ];
   for (const value of candidates) {
     if (typeof value === 'string' && value.length > 0) {
       return value;

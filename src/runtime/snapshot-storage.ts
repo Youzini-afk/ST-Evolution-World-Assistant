@@ -406,12 +406,18 @@ export function hasSnapshotStorePayload(store: SnapshotVersionStore | null | und
   );
 }
 
-async function persistSnapshotStore(fileName: string, store: SnapshotVersionStore): Promise<void> {
+function prepareSnapshotStoreForPersistence(store: SnapshotVersionStore): SnapshotVersionStore {
   const sanitizedStore = cloneStore(store);
   sanitizedStore.updated_at = Date.now();
+  sanitizedStore.version = FILE_ARTIFACT_VERSION;
   pruneAllVersionedEntries(sanitizedStore.versions, FILE_ARTIFACT_REVISION_LIMIT);
   pruneAllVersionedEntries(sanitizedStore.workflow_execution, FILE_ARTIFACT_REVISION_LIMIT);
   pruneAllVersionedEntries(sanitizedStore.replay_capsules, FILE_ARTIFACT_REVISION_LIMIT);
+  return sanitizedStore;
+}
+
+async function persistPreparedSnapshotStore(fileName: string, store: SnapshotVersionStore): Promise<void> {
+  const sanitizedStore = prepareSnapshotStoreForPersistence(store);
 
   const jsonContent = JSON.stringify(sanitizedStore);
   const base64Content = btoa(unescape(encodeURIComponent(jsonContent)));
@@ -427,11 +433,54 @@ async function persistSnapshotStore(fileName: string, store: SnapshotVersionStor
   }
 }
 
+function normalizeStoreForComparison(store: SnapshotVersionStore | null | undefined): Record<string, unknown> | null {
+  if (!store) {
+    return null;
+  }
+
+  const prepared = prepareSnapshotStoreForPersistence(store);
+  return {
+    version: prepared.version,
+    versions: prepared.versions,
+    workflow_execution: prepared.workflow_execution,
+    replay_capsules: prepared.replay_capsules,
+    owner: prepared.owner ?? null,
+  };
+}
+
+function storesEquivalent(
+  actual: SnapshotVersionStore | null | undefined,
+  expected: SnapshotVersionStore | null | undefined,
+): boolean {
+  const actualComparable = normalizeStoreForComparison(actual);
+  const expectedComparable = normalizeStoreForComparison(expected);
+  return JSON.stringify(actualComparable) === JSON.stringify(expectedComparable);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function verifySnapshotStoreWrite(fileName: string, expected: SnapshotVersionStore): Promise<void> {
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const writtenStore = await readSnapshotStore(fileName);
+    if (storesEquivalent(writtenStore, expected)) {
+      return;
+    }
+
+    if (attempt < maxAttempts) {
+      await sleep(80);
+    }
+  }
+
+  throw new Error(`[EW] Snapshot store verification failed for "${fileName}"`);
+}
+
 export async function writeSnapshotStore(fileName: string, store: SnapshotVersionStore): Promise<void> {
-  const nextStore = cloneStore(store);
-  nextStore.version = FILE_ARTIFACT_VERSION;
-  nextStore.updated_at = Date.now();
-  await persistSnapshotStore(fileName, nextStore);
+  const nextStore = prepareSnapshotStoreForPersistence(store);
+  await persistPreparedSnapshotStore(fileName, nextStore);
+  await verifySnapshotStoreWrite(fileName, nextStore);
 }
 
 export async function writeSnapshot(
@@ -464,7 +513,7 @@ export async function writeSnapshot(
   currentStore.versions[versionKey] = data;
   pruneArchivedVersionedEntries(currentStore.versions, versionKey, FILE_ARTIFACT_REVISION_LIMIT);
 
-  await persistSnapshotStore(fileName, currentStore);
+  await writeSnapshotStore(fileName, currentStore);
 
   console.debug(`[Evolution World] Snapshot written: ${fileName}`);
   return fileName;
@@ -472,7 +521,10 @@ export async function writeSnapshot(
 
 export async function readSnapshotStore(fileName: string): Promise<SnapshotVersionStore | null> {
   try {
-    const response = await fetch(`/user/files/${fileName}`);
+    const response = await fetch(`/user/files/${fileName}`, {
+      headers: getRequestHeaders(),
+      cache: 'no-store',
+    });
     if (!response.ok) {
       console.debug(`[Evolution World] Snapshot file not found: ${fileName}`);
       return null;

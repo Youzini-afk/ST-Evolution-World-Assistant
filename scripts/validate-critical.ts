@@ -16,6 +16,7 @@ import {
   type MergedWorldbookDesiredEntry,
   type MergedWorldbookRemoveEntry,
 } from '../src/runtime/types';
+import { resolveMessageTextForVersioning } from '../src/runtime/helpers';
 import { mergeSharedSettingsWithLocalFallback as mergeSharedSettingsWithLocalFallbackFromSettings } from '../src/runtime/settings';
 import { buildDebugHighlightSegments } from '../src/ui/debug-highlight';
 import { collectDynWriteConflictsForTest } from '../src/runtime/transaction';
@@ -310,6 +311,21 @@ function validateSnapshotResolutionSafety(): void {
   );
 }
 
+function validateMessageVersioningPrefersRawMessage(): void {
+  const compatMessage = {
+    message: '这是提示词查看器加工过的展示文本',
+    raw: {
+      mes: '这是原始助手回复',
+      extra: {
+        display_text: '这是提示词查看器加工过的展示文本',
+      },
+    },
+  };
+
+  assert.equal(resolveMessageTextForVersioning(compatMessage), '这是原始助手回复');
+  assert.equal(resolveMessageTextForVersioning({ message: 'fallback text' }), 'fallback text');
+}
+
 function validateStructuredOutputAugment(): void {
   const customAugment = buildStructuredOutputRequestAugment('json_object', 'custom', '');
   assert.equal(customAugment.transportMode, 'response_format_json_object');
@@ -556,6 +572,7 @@ function main(): void {
   validateDynConflictSemantics();
   validateRunWarningSemantics();
   validateSnapshotResolutionSafety();
+  validateMessageVersioningPrefersRawMessage();
   validateStructuredOutputAugment();
   validateWorkflowRegexPipeline();
   validateRuntimeTriggerGuards();

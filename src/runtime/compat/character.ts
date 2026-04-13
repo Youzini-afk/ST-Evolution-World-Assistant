@@ -167,10 +167,10 @@ export async function setChatMessages(
   }
 
   // 持久化
-  if (typeof ctx.saveChat === 'function') {
-    await ctx.saveChat();
-  } else if (typeof ctx.saveChatConditional === 'function') {
+  if (typeof ctx.saveChatConditional === 'function') {
     await ctx.saveChatConditional();
+  } else if (typeof ctx.saveChat === 'function') {
+    await ctx.saveChat();
   }
 }
 

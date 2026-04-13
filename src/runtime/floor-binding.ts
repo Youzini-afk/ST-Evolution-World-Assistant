@@ -1417,6 +1417,146 @@ function buildSnapshotStoreFromVersions(versions: Record<string, SnapshotData>):
   };
 }
 
+type FloorSnapshotBindingState = {
+  entryNames: string[];
+  snapshotFileName: string;
+  swipeId: number | null;
+  contentHash: string;
+  inlineVersions: Record<string, SnapshotData>;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeFloorEntryNames(value: unknown): string[] {
+  return Array.isArray(value)
+    ? _.uniq(
+        value
+          .map(entry => String(entry ?? '').trim())
+          .filter(Boolean),
+      )
+    : [];
+}
+
+function readFloorSnapshotBindingState(data: Record<string, unknown> | undefined | null): FloorSnapshotBindingState {
+  const normalizedData = (data ?? {}) as Record<string, unknown>;
+  return {
+    entryNames: normalizeFloorEntryNames(normalizedData[EW_FLOOR_DATA_KEY]),
+    snapshotFileName:
+      typeof normalizedData[EW_SNAPSHOT_FILE_KEY] === 'string' ? String(normalizedData[EW_SNAPSHOT_FILE_KEY]).trim() : '',
+    swipeId: Number.isFinite(Number(normalizedData[EW_SWIPE_ID_KEY]))
+      ? Number(normalizedData[EW_SWIPE_ID_KEY])
+      : null,
+    contentHash:
+      typeof normalizedData[EW_CONTENT_HASH_KEY] === 'string' ? String(normalizedData[EW_CONTENT_HASH_KEY]).trim() : '',
+    inlineVersions: readInlineSnapshotVersions(normalizedData),
+  };
+}
+
+function applyFloorSnapshotBindingState(
+  baseData: Record<string, unknown> | undefined | null,
+  state: FloorSnapshotBindingState,
+): Record<string, unknown> {
+  const nextData: Record<string, unknown> = {
+    ...((baseData ?? {}) as Record<string, unknown>),
+  };
+  clearFloorSnapshotFields(nextData);
+
+  if (state.entryNames.length > 0) {
+    nextData[EW_FLOOR_DATA_KEY] = [...state.entryNames];
+  }
+
+  if (state.snapshotFileName) {
+    nextData[EW_SNAPSHOT_FILE_KEY] = state.snapshotFileName;
+  }
+
+  if (state.swipeId !== null) {
+    nextData[EW_SWIPE_ID_KEY] = state.swipeId;
+  }
+
+  if (state.contentHash) {
+    nextData[EW_CONTENT_HASH_KEY] = state.contentHash;
+  }
+
+  if (Object.keys(state.inlineVersions).length > 0) {
+    writeInlineSnapshotVersions(nextData, state.inlineVersions);
+  }
+
+  return nextData;
+}
+
+function floorSnapshotBindingStatesEqual(left: FloorSnapshotBindingState, right: FloorSnapshotBindingState): boolean {
+  return (
+    left.snapshotFileName === right.snapshotFileName &&
+    left.swipeId === right.swipeId &&
+    left.contentHash === right.contentHash &&
+    JSON.stringify(left.entryNames) === JSON.stringify(right.entryNames) &&
+    JSON.stringify(left.inlineVersions) === JSON.stringify(right.inlineVersions)
+  );
+}
+
+async function getChatMessageWithRetry(messageId: number, attempts = 8, delayMs = 80): Promise<any | null> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const message = getChatMessages(messageId)[0];
+    if (message) {
+      return message;
+    }
+
+    if (attempt < attempts) {
+      await sleep(delayMs);
+    }
+  }
+
+  return null;
+}
+
+async function persistFloorSnapshotBindingState(
+  messageId: number,
+  state: FloorSnapshotBindingState,
+): Promise<void> {
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const currentMessage = await getChatMessageWithRetry(messageId, 2, 80);
+    if (!currentMessage) {
+      if (attempt < maxAttempts) {
+        await sleep(80);
+        continue;
+      }
+
+      break;
+    }
+
+    const nextData = applyFloorSnapshotBindingState(currentMessage.data ?? {}, state);
+    await setChatMessages([{ message_id: messageId, data: nextData }], { refresh: 'none' });
+
+    const persistedMessage = await getChatMessageWithRetry(messageId, 2, 80);
+    if (persistedMessage) {
+      const persistedState = readFloorSnapshotBindingState(persistedMessage.data ?? {});
+      if (floorSnapshotBindingStatesEqual(persistedState, state)) {
+        return;
+      }
+    }
+
+    if (attempt < maxAttempts) {
+      await sleep(80);
+    }
+  }
+
+  throw createWorkflowRuntimeError('commit_failed', 'commit', {
+    message: '楼层快照写入失败，消息绑定未成功保存。',
+    summary: '楼层快照写入失败，消息绑定未成功保存。',
+    detail:
+      `楼层=${messageId}；` +
+      `目标快照文件=${state.snapshotFileName || '(inline)'}；` +
+      `快照版本=${state.swipeId ?? -1}/${state.contentHash || '(empty)'}；` +
+      `内联版本数=${Object.keys(state.inlineVersions).length}；` +
+      `条目数=${state.entryNames.length}`,
+    target_worldbook_name: '',
+  });
+}
+
 // ── Floor Marking ────────────────────────────────────────────
 
 /**
@@ -1437,13 +1577,14 @@ export async function markFloorEntries(
     persist_empty_snapshot?: boolean;
   },
 ): Promise<void> {
-  const messages = getChatMessages(messageId);
-  if (messages.length === 0) {
-    console.warn(`[Evolution World] markFloorEntries: message #${messageId} not found, snapshot DROPPED`);
-    return;
+  const msg = await getChatMessageWithRetry(messageId);
+  if (!msg) {
+    throw createWorkflowRuntimeError('commit_failed', 'commit', {
+      message: `楼层快照写入失败：未找到楼层 #${messageId}。`,
+      summary: '楼层快照写入失败，未找到对应楼层消息。',
+      detail: `message_id=${messageId}`,
+    });
   }
-
-  const msg = messages[0];
   const previousSnapshotFile = _.get(msg.data, EW_SNAPSHOT_FILE_KEY);
   const previousSnapshotFileName = typeof previousSnapshotFile === 'string' ? previousSnapshotFile.trim() : '';
   const previousSnapshotStore = previousSnapshotFileName ? await readSnapshotStore(previousSnapshotFileName) : null;
@@ -1511,7 +1652,7 @@ export async function markFloorEntries(
     }
 
     observedMessageVersionKeys.set(messageId, versionKey);
-    await setChatMessages([{ message_id: messageId, data: nextData }], { refresh: 'none' });
+    await persistFloorSnapshotBindingState(messageId, readFloorSnapshotBindingState(nextData));
     return;
   }
 
@@ -1581,7 +1722,7 @@ export async function markFloorEntries(
     );
   }
   observedMessageVersionKeys.set(messageId, versionKey);
-  await setChatMessages([{ message_id: messageId, data: nextData }], { refresh: 'none' });
+  await persistFloorSnapshotBindingState(messageId, readFloorSnapshotBindingState(nextData));
 }
 
 function hasAnySnapshotReferences(messages: any[]): boolean {

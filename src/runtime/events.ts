@@ -910,6 +910,34 @@ function syncArtifactMessageVersionMeta(
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function persistLatestMessageData(
+  messageId: number,
+  buildNextData: (message: any) => Promise<Record<string, unknown>>,
+): Promise<void> {
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const message = getChatMessages(messageId)[0];
+    if (!message) {
+      if (attempt < maxAttempts) {
+        await sleep(80);
+        continue;
+      }
+      return;
+    }
+
+    const nextData = await buildNextData(message);
+    await setChatMessages([{ message_id: messageId, data: nextData }], {
+      refresh: "none",
+    });
+    return;
+  }
+}
+
 async function persistFloorWorkflowExecutionMap(
   messageId: number,
   map: FloorWorkflowExecutionVersionedMap,
@@ -921,12 +949,10 @@ async function persistFloorWorkflowExecutionMap(
 
   const normalizedMap = normalizeFloorWorkflowExecutionMap(map);
   pruneAllVersionedEntries(normalizedMap, 2);
-  const { message, fileName } = resolved;
-  const nextData: Record<string, unknown> = {
-    ...(message.data ?? {}),
-  };
+  const { fileName } = resolved;
+  let writeMode: "file" | "inline" = getSettings().snapshot_storage === "file" ? "file" : "inline";
 
-  if (getSettings().snapshot_storage === "file") {
+  if (writeMode === "file") {
     try {
       const chatId = getCurrentChatKey();
       const charName = getCurrentCharacterNameSafe();
@@ -939,17 +965,10 @@ async function persistFloorWorkflowExecutionMap(
 
       if (Object.keys(normalizedMap).length > 0) {
         await writeSnapshotStore(fileName, store);
-        nextData[EW_SNAPSHOT_FILE_KEY] = fileName;
-        nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY] =
-          buildFloorWorkflowExecutionSummaryMap(normalizedMap);
-        syncArtifactMessageVersionMeta(nextData, message);
       } else {
-        delete nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY];
         if (hasSnapshotStorePayload(store)) {
           await writeSnapshotStore(fileName, store);
-          nextData[EW_SNAPSHOT_FILE_KEY] = fileName;
         } else {
-          delete nextData[EW_SNAPSHOT_FILE_KEY];
           await deleteSnapshot(fileName);
         }
       }
@@ -958,20 +977,40 @@ async function persistFloorWorkflowExecutionMap(
         "[Evolution World] workflow execution artifact externalization failed, falling back to message data:",
         error,
       );
-      if (Object.keys(normalizedMap).length > 0) {
-        nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY] = normalizedMap;
-      } else {
-        delete nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY];
-      }
+      writeMode = "inline";
     }
-  } else if (Object.keys(normalizedMap).length > 0) {
-    nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY] = normalizedMap;
-  } else {
-    delete nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY];
   }
 
-  await setChatMessages([{ message_id: messageId, data: nextData }], {
-    refresh: "none",
+  await persistLatestMessageData(messageId, async (message) => {
+    const nextData: Record<string, unknown> = {
+      ...(message.data ?? {}),
+    };
+
+    if (writeMode === "file") {
+      if (Object.keys(normalizedMap).length > 0) {
+        nextData[EW_SNAPSHOT_FILE_KEY] = fileName;
+        nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY] =
+          buildFloorWorkflowExecutionSummaryMap(normalizedMap);
+        syncArtifactMessageVersionMeta(nextData, message);
+      } else {
+        delete nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY];
+        const refreshedStore = await readSnapshotStore(fileName);
+        if (hasSnapshotStorePayload(refreshedStore)) {
+          nextData[EW_SNAPSHOT_FILE_KEY] = fileName;
+        } else {
+          delete nextData[EW_SNAPSHOT_FILE_KEY];
+        }
+      }
+      return nextData;
+    }
+
+    if (Object.keys(normalizedMap).length > 0) {
+      nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY] = normalizedMap;
+    } else {
+      delete nextData[EW_FLOOR_WORKFLOW_EXECUTION_KEY];
+    }
+
+    return nextData;
   });
 }
 
@@ -1162,11 +1201,9 @@ async function writeWorkflowReplayCapsule(
 
   const normalizedMap = normalizeWorkflowReplayCapsuleMap(map);
   pruneAllVersionedEntries(normalizedMap, 2);
-  const nextData: Record<string, unknown> = {
-    ...(message.data ?? {}),
-  };
+  let writeMode: "file" | "inline" = getSettings().snapshot_storage === "file" ? "file" : "inline";
 
-  if (getSettings().snapshot_storage === "file") {
+  if (writeMode === "file") {
     try {
       const chatId = getCurrentChatKey();
       const charName = getCurrentCharacterNameSafe();
@@ -1179,17 +1216,10 @@ async function writeWorkflowReplayCapsule(
 
       if (Object.keys(normalizedMap).length > 0) {
         await writeSnapshotStore(resolved.fileName, store);
-        nextData[EW_SNAPSHOT_FILE_KEY] = resolved.fileName;
-        nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY] =
-          buildWorkflowReplayCapsuleSummaryMap(normalizedMap);
-        syncArtifactMessageVersionMeta(nextData, message);
       } else {
-        delete nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY];
         if (hasSnapshotStorePayload(store)) {
           await writeSnapshotStore(resolved.fileName, store);
-          nextData[EW_SNAPSHOT_FILE_KEY] = resolved.fileName;
         } else {
-          delete nextData[EW_SNAPSHOT_FILE_KEY];
           await deleteSnapshot(resolved.fileName);
         }
       }
@@ -1198,20 +1228,40 @@ async function writeWorkflowReplayCapsule(
         "[Evolution World] replay capsule externalization failed, falling back to message data:",
         error,
       );
-      if (Object.keys(normalizedMap).length > 0) {
-        nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY] = normalizedMap;
-      } else {
-        delete nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY];
-      }
+      writeMode = "inline";
     }
-  } else if (Object.keys(normalizedMap).length > 0) {
-    nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY] = normalizedMap;
-  } else {
-    delete nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY];
   }
 
-  await setChatMessages([{ message_id: messageId, data: nextData }], {
-    refresh: "none",
+  await persistLatestMessageData(messageId, async (latestMessage) => {
+    const nextData: Record<string, unknown> = {
+      ...(latestMessage.data ?? {}),
+    };
+
+    if (writeMode === "file") {
+      if (Object.keys(normalizedMap).length > 0) {
+        nextData[EW_SNAPSHOT_FILE_KEY] = resolved.fileName;
+        nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY] =
+          buildWorkflowReplayCapsuleSummaryMap(normalizedMap);
+        syncArtifactMessageVersionMeta(nextData, latestMessage);
+      } else {
+        delete nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY];
+        const refreshedStore = await readSnapshotStore(resolved.fileName);
+        if (hasSnapshotStorePayload(refreshedStore)) {
+          nextData[EW_SNAPSHOT_FILE_KEY] = resolved.fileName;
+        } else {
+          delete nextData[EW_SNAPSHOT_FILE_KEY];
+        }
+      }
+      return nextData;
+    }
+
+    if (Object.keys(normalizedMap).length > 0) {
+      nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY] = normalizedMap;
+    } else {
+      delete nextData[EW_WORKFLOW_REPLAY_CAPSULE_KEY];
+    }
+
+    return nextData;
   });
 }
 
