@@ -15,6 +15,7 @@ import { createDefaultApiPreset, createDefaultFlow } from '../runtime/factory';
 import {
   collectAllFloorSnapshots,
   collectLatestSnapshots,
+  recoverFloorSnapshotsForCurrentChat,
   rollbackToFloor,
   type FloorSnapshot,
   type LatestSnapshotsResult,
@@ -1181,7 +1182,21 @@ export const useEwStore = defineStore('evolution-world-store', () => {
   async function loadFloorSnapshots() {
     busy.value = true;
     try {
-      const floors = await collectAllFloorSnapshots();
+      let floors = await collectAllFloorSnapshots();
+      const initialSnapshotCount = floors.filter(floor => floor.snapshot !== null).length;
+      if (floors.length > 0 && initialSnapshotCount === 0) {
+        const recovery = await recoverFloorSnapshotsForCurrentChat(settings.value);
+        floors = await collectAllFloorSnapshots();
+        console.info('[Evolution World] history snapshot recovery:', {
+          inferred_file_refs: recovery.inferred_file_refs,
+          localized: recovery.localized,
+          uplifted: recovery.uplifted,
+          repaired_before: recovery.repaired_before,
+          repaired_after: recovery.repaired_after,
+          unresolved: recovery.unresolved,
+          warnings: recovery.warnings,
+        });
+      }
       floorSnapshots.value = await Promise.all(
         floors.map(async floor => {
           const execution =
@@ -1201,7 +1216,16 @@ export const useEwStore = defineStore('evolution-world-store', () => {
           } satisfies FloorSnapshot;
         }),
       );
-      showEwNotice({ title: '历史', message: `已加载 ${floorSnapshots.value.length} 个楼层`, level: 'success' });
+      const snapshotCount = floorSnapshots.value.filter(floor => floor.snapshot !== null).length;
+      console.info(`[Evolution World] history floor snapshots loaded: ${snapshotCount}/${floorSnapshots.value.length}`);
+      showEwNotice({
+        title: '历史',
+        message:
+          snapshotCount > 0
+            ? `已加载 ${snapshotCount} / ${floorSnapshots.value.length} 个楼层快照`
+            : `已加载 ${floorSnapshots.value.length} 个楼层，但仍未命中可读取快照`,
+        level: snapshotCount > 0 ? 'success' : 'warning',
+      });
     } catch (e) {
       console.error('[Evolution World] loadFloorSnapshots failed:', e);
       showEwNotice({ title: '历史', message: '楼层快照加载失败: ' + (e as Error).message, level: 'error' });

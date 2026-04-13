@@ -26,6 +26,7 @@ import {
   buildSnapshotStoreOwner,
   cleanupSnapshotFiles,
   deleteSnapshot,
+  findSnapshotFiles,
   hasSnapshotStorePayload,
   readSnapshotStore,
   writeSnapshot,
@@ -297,6 +298,30 @@ function getMessageSnapshotFileCandidates(msg: any): string[] {
   }
 
   return candidates;
+}
+
+function parseMessageIdFromSnapshotFileName(fileName: string): number | null {
+  const match = /__msg-(\d+)\.json$/i.exec(String(fileName ?? '').trim());
+  if (!match) {
+    return null;
+  }
+  const messageId = Number(match[1]);
+  return Number.isFinite(messageId) && messageId >= 0 ? messageId : null;
+}
+
+function pickPreferredSnapshotFile(fileNames: string[]): string | null {
+  if (fileNames.length === 0) {
+    return null;
+  }
+
+  return [...fileNames].sort((left, right) => {
+    const leftScore = left.includes('__fp-') ? 0 : 1;
+    const rightScore = right.includes('__fp-') ? 0 : 1;
+    if (leftScore !== rightScore) {
+      return leftScore - rightScore;
+    }
+    return left.localeCompare(right);
+  })[0];
 }
 
 function isSnapshotFileNamedForCurrentChat(fileName: string): boolean {
@@ -1194,6 +1219,75 @@ export async function localizeSnapshotsForCurrentChat(settings: EwSettings): Pro
   }
 }
 
+async function backfillSnapshotFileRefsForCurrentChat(): Promise<{ attached: number; warnings: string[] }> {
+  const lastId = getLastMessageId();
+  if (lastId < 0) {
+    return { attached: 0, warnings: [] };
+  }
+
+  const allMessages = getChatMessages(`0-${lastId}`);
+  const messageIds = allMessages
+    .map(message => Number(message.message_id))
+    .filter(messageId => Number.isFinite(messageId) && messageId >= 0);
+  if (messageIds.length === 0) {
+    return { attached: 0, warnings: [] };
+  }
+
+  const discoveredFiles = await findSnapshotFiles(getCharName(), getChatId(), messageIds);
+  if (discoveredFiles.length === 0) {
+    return { attached: 0, warnings: [] };
+  }
+
+  const filesByMessageId = new Map<number, string[]>();
+  const warnings: string[] = [];
+  for (const fileName of discoveredFiles) {
+    const messageId = parseMessageIdFromSnapshotFileName(fileName);
+    if (messageId == null) {
+      warnings.push(`无法从快照文件名推断楼层: ${fileName}`);
+      continue;
+    }
+    const bucket = filesByMessageId.get(messageId) ?? [];
+    bucket.push(fileName);
+    filesByMessageId.set(messageId, bucket);
+  }
+
+  const updates: Array<{ message_id: number; data: Record<string, unknown> }> = [];
+  for (const message of allMessages) {
+    const messageId = Number(message.message_id);
+    const nextFileName = pickPreferredSnapshotFile(filesByMessageId.get(messageId) ?? []);
+    if (!nextFileName) {
+      continue;
+    }
+
+    const explicitFileName =
+      typeof message?.data?.[EW_SNAPSHOT_FILE_KEY] === 'string' ? String(message.data[EW_SNAPSHOT_FILE_KEY]).trim() : '';
+    if (explicitFileName) {
+      continue;
+    }
+
+    if (Object.keys(readInlineSnapshotVersions((message.data ?? {}) as Record<string, unknown>)).length > 0) {
+      continue;
+    }
+
+    updates.push({
+      message_id: messageId,
+      data: {
+        ...(message.data ?? {}),
+        [EW_SNAPSHOT_FILE_KEY]: nextFileName,
+      },
+    });
+  }
+
+  if (updates.length > 0) {
+    await setChatMessages(updates, { refresh: 'none' });
+  }
+
+  return {
+    attached: updates.length,
+    warnings,
+  };
+}
+
 // ── Legacy upgrade helpers ───────────────────────────────────
 
 /**
@@ -1832,6 +1926,16 @@ export type FloorSnapshot = {
   };
 };
 
+export type FloorSnapshotCompatibilityRecoveryResult = {
+  repaired_before: number;
+  repaired_after: number;
+  localized: number;
+  uplifted: number;
+  unresolved: number;
+  inferred_file_refs: number;
+  warnings: string[];
+};
+
 export type SnapshotDiff = {
   created: string[];
   modified: string[];
@@ -1867,6 +1971,33 @@ export async function collectAllFloorSnapshots(): Promise<FloorSnapshot[]> {
   }
 
   return result;
+}
+
+export async function recoverFloorSnapshotsForCurrentChat(
+  settings: EwSettings,
+): Promise<FloorSnapshotCompatibilityRecoveryResult> {
+  const repairedBefore = await repairCurrentChatSuspiciousEmptySnapshots();
+  const inferred = await backfillSnapshotFileRefsForCurrentChat();
+  const localization = await localizeSnapshotsForCurrentChat(settings);
+  const repairedAfter =
+    inferred.attached > 0 || localization.localized > 0 || localization.uplifted > 0
+      ? await repairCurrentChatSuspiciousEmptySnapshots()
+      : { repaired: 0, warnings: [] };
+
+  return {
+    repaired_before: repairedBefore.repaired,
+    repaired_after: repairedAfter.repaired,
+    localized: localization.localized,
+    uplifted: localization.uplifted,
+    unresolved: localization.unresolved,
+    inferred_file_refs: inferred.attached,
+    warnings: [
+      ...repairedBefore.warnings,
+      ...inferred.warnings,
+      ...localization.warnings,
+      ...repairedAfter.warnings,
+    ],
+  };
 }
 
 export async function readFloorSnapshotByMessageId(
