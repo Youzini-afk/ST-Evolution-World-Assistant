@@ -18,6 +18,10 @@
       跳过，或当前可见版本与旧快照不匹配。
     </div>
 
+    <div v-if="timelineBuildWarnings.length > 0" class="hist-info hist-info--warning">
+      历史时间线中有 {{ timelineBuildWarnings.length }} 个楼层快照格式异常，已自动跳过损坏字段并继续显示其余楼层。
+    </div>
+
     <div v-if="store.floorSnapshots.length > 0" class="hist-grid-wrap">
       <div class="hist-grid">
         <div
@@ -115,8 +119,9 @@
 </template>
 
 <script setup lang="ts">
-import { diffSnapshots, type SnapshotDiff } from '../../runtime/floor-binding';
-import type { SnapshotData } from '../../runtime/snapshot-storage';
+import { getChatMessages } from '../../runtime/compat/character';
+import { diffSnapshots, type FloorSnapshotReadResolution, type SnapshotDiff } from '../../runtime/floor-binding';
+import { upgradeSnapshotData, type SnapshotData } from '../../runtime/snapshot-storage';
 import { useEwStore } from '../store';
 import EwFloorDetailModal from './EwFloorDetailModal.vue';
 import EwSectionCard from './EwSectionCard.vue';
@@ -128,6 +133,7 @@ const EW_BEFORE_REPLY_BINDING_META_KEY = 'ew_before_reply_binding';
 const EW_REDERIVE_META_KEY = 'ew_rederive_meta';
 let openFloorFrame: number | null = null;
 
+type FloorSnapshotItem = (typeof store.floorSnapshots)[number];
 type FloorRole = 'assistant' | 'user' | 'other';
 type FloorAnchorKind = 'assistant_anchor' | 'source_user' | 'legacy_user_anchor' | 'normal';
 type TimelineSemantic = {
@@ -140,10 +146,15 @@ type TimelineSemantic = {
   };
 };
 type TimelineItem = {
-  floor: (typeof store.floorSnapshots)[number];
+  floor: FloorSnapshotItem;
   diff: SnapshotDiff;
   semantic: TimelineSemantic;
   has_execution: boolean;
+};
+type FloorExecutionRecord = NonNullable<FloorSnapshotItem['execution']>;
+type TimelineBuildResult = {
+  items: TimelineItem[];
+  warnings: string[];
 };
 
 function normalizeRole(raw: unknown): FloorRole {
@@ -189,32 +200,139 @@ function normalizeRederiveMeta(raw: unknown): { legacy_approx: boolean; conflict
   };
 }
 
-const floorRuntimeMap = computed(() => {
-  const result = new Map<
-    number,
-    {
-      role: FloorRole;
-      binding_meta: ReturnType<typeof normalizeBindingMeta>;
-      rederive_meta: ReturnType<typeof normalizeRederiveMeta>;
-    }
-  >();
+function pushTimelineWarning(warnings: string[], messageId: number, detail: string) {
+  warnings.push(`楼层 #${messageId}: ${detail}`);
+}
 
-  for (const floor of store.floorSnapshots) {
-    const message = getChatMessages(floor.messageId)[0];
-    const role = normalizeRole(message?.role);
-    const bindingMeta = normalizeBindingMeta(message?.data?.[EW_BEFORE_REPLY_BINDING_META_KEY]);
-    const rederiveMeta = normalizeRederiveMeta(message?.data?.[EW_REDERIVE_META_KEY]);
-    result.set(floor.messageId, {
-      role,
-      binding_meta: bindingMeta,
-      rederive_meta: rederiveMeta,
-    });
+function normalizeFloorResolution(
+  raw: unknown,
+  messageId: number,
+  warnings: string[],
+): FloorSnapshotReadResolution {
+  if (
+    raw === 'exact' ||
+    raw === 'single_fallback' ||
+    raw === 'same_swipe_fallback' ||
+    raw === 'latest_fallback' ||
+    raw === 'missing'
+  ) {
+    return raw;
+  }
+  pushTimelineWarning(warnings, messageId, '快照解析状态异常，已按“缺失”处理。');
+  return 'missing';
+}
+
+function normalizeExecutionRecord(raw: unknown): FloorExecutionRecord | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined;
   }
 
-  return result;
-});
+  const record = raw as Record<string, unknown>;
+  if (record.execution_status !== 'executed' && record.execution_status !== 'skipped') {
+    return undefined;
+  }
 
-const hasSnapshotCount = computed(() => store.floorSnapshots.filter(f => f.snapshot !== null).length);
+  const toStringArray = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value
+          .map(item => String(item ?? '').trim())
+          .filter(Boolean)
+      : [];
+
+  return {
+    execution_status: record.execution_status,
+    skip_reason: typeof record.skip_reason === 'string' ? record.skip_reason : undefined,
+    attempted_flow_ids: toStringArray(record.attempted_flow_ids),
+    failed_flow_ids: toStringArray(record.failed_flow_ids),
+    workflow_failed: Boolean(record.workflow_failed),
+  };
+}
+
+function sanitizeSnapshotData(raw: unknown, messageId: number, warnings: string[]): SnapshotData | null {
+  if (raw == null) {
+    return null;
+  }
+
+  const upgraded = upgradeSnapshotData(raw);
+  if (upgraded) {
+    return upgraded;
+  }
+
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    pushTimelineWarning(warnings, messageId, '快照结构异常，已忽略该楼层快照。');
+    return null;
+  }
+
+  const snapshot = raw as Record<string, unknown>;
+  const dynEntries = Array.isArray(snapshot.dyn_entries)
+    ? (snapshot.dyn_entries.filter(entry => entry && typeof entry === 'object') as SnapshotData['dyn_entries'])
+    : [];
+  const controllers = Array.isArray(snapshot.controllers)
+    ? snapshot.controllers
+        .filter(entry => entry && typeof entry === 'object')
+        .map(entry => {
+          const record = entry as Record<string, unknown>;
+          return {
+            entry_name: String(record.entry_name ?? '').trim(),
+            content: String(record.content ?? ''),
+            flow_id: typeof record.flow_id === 'string' ? record.flow_id : undefined,
+            flow_name: typeof record.flow_name === 'string' ? record.flow_name : undefined,
+            legacy: Boolean(record.legacy),
+          };
+        })
+    : [];
+
+  pushTimelineWarning(warnings, messageId, '快照字段不完整，已按兼容模式修复展示。');
+  return {
+    controllers,
+    dyn_entries: dynEntries,
+    swipe_id: typeof snapshot.swipe_id === 'number' ? snapshot.swipe_id : undefined,
+    content_hash: typeof snapshot.content_hash === 'string' ? snapshot.content_hash : undefined,
+  };
+}
+
+function sanitizeFloorSnapshot(
+  floor: FloorSnapshotItem,
+  index: number,
+  warnings: string[],
+): FloorSnapshotItem {
+  const rawMessageId = Number(floor?.messageId);
+  const messageId = Number.isFinite(rawMessageId) && rawMessageId >= 0 ? rawMessageId : index;
+  if (messageId !== rawMessageId) {
+    pushTimelineWarning(warnings, messageId, '楼层编号异常，已按顺序位置兼容显示。');
+  }
+
+  return {
+    ...floor,
+    messageId,
+    snapshot: sanitizeSnapshotData(floor?.snapshot ?? null, messageId, warnings),
+    resolution: normalizeFloorResolution(floor?.resolution, messageId, warnings),
+    available_version_count: Math.max(0, Math.trunc(Number(floor?.available_version_count ?? 0) || 0)),
+    source: floor?.source === 'file' || floor?.source === 'inline' ? floor.source : 'none',
+    matched_version_key: typeof floor?.matched_version_key === 'string' ? floor.matched_version_key : undefined,
+    file_name: typeof floor?.file_name === 'string' ? floor.file_name : undefined,
+    execution: normalizeExecutionRecord((floor as { execution?: unknown }).execution),
+  };
+}
+
+function readFloorRuntimeMeta(messageId: number, warnings: string[]) {
+  try {
+    const message = getChatMessages(messageId)[0];
+    return {
+      role: normalizeRole(message?.role),
+      binding_meta: normalizeBindingMeta(message?.data?.[EW_BEFORE_REPLY_BINDING_META_KEY]),
+      rederive_meta: normalizeRederiveMeta(message?.data?.[EW_REDERIVE_META_KEY]),
+    };
+  } catch (error) {
+    console.warn(`[Evolution World] history runtime metadata read failed for floor #${messageId}:`, error);
+    pushTimelineWarning(warnings, messageId, '消息元数据读取失败，已按普通楼层显示。');
+    return {
+      role: 'other' as FloorRole,
+      binding_meta: null,
+      rederive_meta: null,
+    };
+  }
+}
 
 onMounted(() => {
   void store.loadFloorSnapshots();
@@ -229,28 +347,38 @@ const selectedSnapshot = computed<SnapshotData | null>(() => {
 });
 
 const selectedPrevSnapshot = computed<SnapshotData | null>(() => {
-  const idx = store.floorSnapshots.findIndex(f => f.messageId === selectedFloorId.value);
+  const idx = timelineItems.value.findIndex(item => item.floor.messageId === selectedFloorId.value);
   if (idx <= 0) return null;
-  // 查找最近的拥有快照的前一楼层
+
   for (let i = idx - 1; i >= 0; i--) {
-    if (store.floorSnapshots[i].snapshot) return store.floorSnapshots[i].snapshot;
+    if (timelineItems.value[i].floor.snapshot) {
+      return timelineItems.value[i].floor.snapshot;
+    }
   }
   return null;
 });
 
 const emptyDiff: SnapshotDiff = { created: [], modified: [], deleted: [], toggled: [], controllersChanged: {} };
-const timelineItems = computed(() => {
+const timelineBuildResult = computed<TimelineBuildResult>(() => {
   const items: TimelineItem[] = [];
+  const warnings: string[] = [];
   let previousSnapshot: SnapshotData | null = null;
 
   for (let index = 0; index < store.floorSnapshots.length; index += 1) {
-    const floor = store.floorSnapshots[index];
+    const floor = sanitizeFloorSnapshot(store.floorSnapshots[index], index, warnings);
     const currentSnapshot = floor.snapshot;
-    const diff = diffSnapshots(previousSnapshot, currentSnapshot) ?? emptyDiff;
-    const runtimeMeta = floorRuntimeMap.value.get(floor.messageId);
-    const role = runtimeMeta?.role ?? 'other';
-    const bindingMeta = runtimeMeta?.binding_meta;
-    const rederiveMeta = runtimeMeta?.rederive_meta;
+    let diff = emptyDiff;
+    try {
+      diff = diffSnapshots(previousSnapshot, currentSnapshot) ?? emptyDiff;
+    } catch (error) {
+      console.warn(`[Evolution World] history timeline diff failed for floor #${floor.messageId}:`, error);
+      pushTimelineWarning(warnings, floor.messageId, '快照差异计算失败，已降级显示该楼层。');
+    }
+
+    const runtimeMeta = readFloorRuntimeMeta(floor.messageId, warnings);
+    const role = runtimeMeta.role;
+    const bindingMeta = runtimeMeta.binding_meta;
+    const rederiveMeta = runtimeMeta.rederive_meta;
     const hasExecution = Boolean(floorExecutionMap.value.get(floor.messageId));
     const hasSnapshot = Boolean(currentSnapshot);
 
@@ -307,8 +435,15 @@ const timelineItems = computed(() => {
     }
   }
 
-  return items;
+  return {
+    items,
+    warnings: [...new Set(warnings)],
+  };
 });
+
+const timelineItems = computed(() => timelineBuildResult.value.items);
+const timelineBuildWarnings = computed(() => timelineBuildResult.value.warnings);
+const hasSnapshotCount = computed(() => timelineItems.value.filter(item => item.floor.snapshot !== null).length);
 
 const assistantAnchorCount = computed(
   () => timelineItems.value.filter(item => item.semantic.anchor_kind === 'assistant_anchor' && item.floor.snapshot).length,
@@ -318,23 +453,14 @@ const sourceFloorCount = computed(
 );
 
 const floorExecutionMap = computed(() => {
-  const result = new Map<
-    number,
-    {
-      execution_status?: 'executed' | 'skipped';
-      skip_reason?: string;
-      attempted_flow_ids?: string[];
-      failed_flow_ids?: string[];
-      workflow_failed?: boolean;
-    }
-  >();
+  const result = new Map<number, FloorExecutionRecord>();
 
   for (const floor of store.floorSnapshots) {
-    const raw = (floor as unknown as { execution?: unknown }).execution;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    const execution = normalizeExecutionRecord((floor as { execution?: unknown }).execution);
+    if (!execution) {
       continue;
     }
-    result.set(floor.messageId, raw as typeof result extends Map<any, infer V> ? V : never);
+    result.set(floor.messageId, execution);
   }
 
   return result;
@@ -489,6 +615,21 @@ onBeforeUnmount(() => {
     openFloorFrame = null;
   }
 });
+
+watch(
+  timelineItems,
+  items => {
+    if (items.length === 0) {
+      selectedFloorId.value = 0;
+      return;
+    }
+
+    if (!items.some(item => item.floor.messageId === selectedFloorId.value)) {
+      selectedFloorId.value = items[0].floor.messageId;
+    }
+  },
+  { immediate: true },
+);
 
 async function onRebuildSelectedFloor() {
   const item = selectedTimelineItem.value;
