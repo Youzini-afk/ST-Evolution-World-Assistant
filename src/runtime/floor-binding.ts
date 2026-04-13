@@ -267,6 +267,7 @@ function shouldSkipRestoreForMvuExtraAnalysis(hookName: string): boolean {
 function hasSnapshotMetadataHints(msg: any): boolean {
   const data = (msg?.data ?? {}) as Record<string, unknown>;
   return Boolean(
+    data[EW_FLOOR_DATA_KEY] ||
     data[EW_SNAPSHOT_FILE_KEY] ||
     data[EW_INLINE_SNAPSHOT_VERSIONS_KEY] ||
     data[EW_CONTROLLER_DATA_KEY] ||
@@ -1587,6 +1588,7 @@ function hasAnySnapshotReferences(messages: any[]): boolean {
   return messages.some(msg => {
     const data = (msg?.data ?? {}) as Record<string, unknown>;
     return Boolean(
+      data[EW_FLOOR_DATA_KEY] ||
       data[EW_SNAPSHOT_FILE_KEY] ||
       data[EW_INLINE_SNAPSHOT_VERSIONS_KEY] ||
       data[EW_CONTROLLER_DATA_KEY] ||
