@@ -223,6 +223,44 @@ export function buildRunWarningFromCommitSummaryForTest(
   return buildRunWarningFromCommitSummary(commitSummary);
 }
 
+function buildNoEffectiveRequestWarning(
+  commitSummary: CommitSummary | null,
+  replyInstruction: string,
+): WorkflowWarning | null {
+  if (!commitSummary) {
+    return null;
+  }
+
+  if (commitSummary.effective_change_count > 0) {
+    return null;
+  }
+
+  if (String(replyInstruction ?? '').trim()) {
+    return null;
+  }
+
+  if (commitSummary.dyn_entries_requested > 0 || commitSummary.controller_entries_requested > 0) {
+    return null;
+  }
+
+  return {
+    code: 'no_effective_request',
+    summary: '本轮工作流没有请求任何世界书写入或回复指令，已按空操作完成。',
+    detail:
+      `目标世界书：${commitSummary.target_worldbook_name || '(none)'}；` +
+      `Dyn 请求=${commitSummary.dyn_entries_requested}；` +
+      `Controller 请求=${commitSummary.controller_entries_requested}；` +
+      `实际变化=${commitSummary.effective_change_count}。`,
+  };
+}
+
+export function buildNoEffectiveRequestWarningForTest(
+  commitSummary: CommitSummary | null,
+  replyInstruction: string,
+): WorkflowWarning | null {
+  return buildNoEffectiveRequestWarning(commitSummary, replyInstruction);
+}
+
 async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -446,11 +484,16 @@ export async function runWorkflow(
     throwIfWorkflowCancelled(input);
 
     if (commitResult.effective_change_count === 0 && !mergedPlan.reply_instruction.trim()) {
+      const noopWarning = buildNoEffectiveRequestWarning(commitSummary, mergedPlan.reply_instruction);
+      if (noopWarning) {
+        runWarning = runWarning ?? noopWarning;
+      } else {
       throw createWorkflowRuntimeError("no_effective_write", "commit", {
         message: "本轮执行没有产生任何有效写入或回复指令，已按失败处理。",
         detail: `target_worldbook=${commitResult.target_worldbook_name || "(none)"}`,
         target_worldbook_name: commitResult.target_worldbook_name,
       });
+      }
     }
 
     if (input.inject_reply !== false) {

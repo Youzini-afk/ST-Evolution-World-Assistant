@@ -482,6 +482,8 @@ function formatWarningCode(code: string): string {
   switch (code) {
     case 'dyn_not_updated':
       return 'Dyn 未更新';
+    case 'no_effective_request':
+      return '空操作';
     default:
       return '运行警告';
   }

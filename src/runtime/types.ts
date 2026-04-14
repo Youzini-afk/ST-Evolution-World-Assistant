@@ -571,6 +571,7 @@ export const CommitSummarySchema = z.object({
 
 export const WorkflowWarningCodeSchema = z.enum([
   'dyn_not_updated',
+  'no_effective_request',
 ]);
 
 export const WorkflowWarningSchema = z.object({

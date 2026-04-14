@@ -20,7 +20,10 @@ import { resolveMessageTextForVersioning } from '../src/runtime/helpers';
 import { mergeSharedSettingsWithLocalFallback as mergeSharedSettingsWithLocalFallbackFromSettings } from '../src/runtime/settings';
 import { buildDebugHighlightSegments } from '../src/ui/debug-highlight';
 import { collectDynWriteConflictsForTest } from '../src/runtime/transaction';
-import { buildRunWarningFromCommitSummaryForTest } from '../src/runtime/pipeline';
+import {
+  buildNoEffectiveRequestWarningForTest,
+  buildRunWarningFromCommitSummaryForTest,
+} from '../src/runtime/pipeline';
 import { isSnapshotResolutionUnsafeForDestructiveWriteForTest } from '../src/runtime/floor-binding';
 import { applyLocalWorkflowRegexForTest, applyTavernRegexFallbackForTest } from '../src/runtime/regex-engine';
 import { buildStructuredOutputRequestAugment } from '../src/runtime/structured-output';
@@ -294,6 +297,28 @@ function validateRunWarningSemantics(): void {
     }),
   );
   assert.equal(noWarning, null);
+
+  const noopWarning = buildNoEffectiveRequestWarningForTest(
+    CommitSummarySchema.parse({
+      target_worldbook_name: 'WB_Main',
+      dyn_entries_requested: 0,
+      controller_entries_requested: 0,
+      effective_change_count: 0,
+    }),
+    '',
+  );
+  assert.equal(noopWarning?.code, 'no_effective_request');
+
+  const noopSuppressedByReply = buildNoEffectiveRequestWarningForTest(
+    CommitSummarySchema.parse({
+      target_worldbook_name: 'WB_Main',
+      dyn_entries_requested: 0,
+      controller_entries_requested: 0,
+      effective_change_count: 0,
+    }),
+    'reply only',
+  );
+  assert.equal(noopSuppressedByReply, null);
 }
 
 function validateSnapshotResolutionSafety(): void {
