@@ -46,6 +46,42 @@ export function buildJsonObjectStructuredSchema(): EwStructuredOutputSchema {
   };
 }
 
+ export function isLikelyStructuredOutputUnsupportedError(error: unknown): boolean {
+   const message = String(error instanceof Error ? error.message : error ?? '')
+     .replace(/\s+/g, ' ')
+     .trim()
+     .toLowerCase();
+   if (!message) {
+     return false;
+   }
+
+   const mentionsStructuredTransport =
+     /response[_\s-]?format/.test(message) ||
+     /json[_\s-]?schema/.test(message) ||
+     /json[_\s-]?object/.test(message) ||
+     /structured outputs?/.test(message);
+   if (!mentionsStructuredTransport) {
+     return false;
+   }
+
+   return (
+     /not supported/.test(message) ||
+     /unsupported/.test(message) ||
+     /unsupported_parameter/.test(message) ||
+     /unknown parameter/.test(message) ||
+     /unknown argument/.test(message) ||
+     /unrecognized (?:field|parameter|argument)/.test(message) ||
+     /invalid parameter/.test(message) ||
+     /extra inputs? are not permitted/.test(message) ||
+     /unexpected(?: keyword)? argument/.test(message) ||
+     /not allowed/.test(message) ||
+     /only supported/.test(message) ||
+     /does not support/.test(message) ||
+     /doesn't support/.test(message) ||
+     /is not available/.test(message)
+   );
+ }
+
 function mergeJsonObjectResponseFormatIntoCustomIncludeBody(existingBody: string): {
   customIncludeBody?: string;
   note?: string;

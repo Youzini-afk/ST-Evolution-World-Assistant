@@ -12,6 +12,7 @@ import {
   buildJsonObjectStructuredSchema,
   buildStructuredOutputRequestAugment,
   isJsonObjectStructuredOutputMode,
+  isLikelyStructuredOutputUnsupportedError,
 } from './structured-output';
 import {
   ContextCursor,
@@ -1093,23 +1094,44 @@ async function executeFlowViaMainApiStBackend(
   return executeFlowViaChatCompletionsBackend(flow, requestBody, targetLabel, onStreamText, abortSignal, isCancelled);
 }
 
-async function executeFlow(
-  settings: EwSettings,
-  flow: EwFlowConfig,
-  flowOrder: number,
-  messageId: number,
-  userInput: string | undefined,
-  trigger: FlowTriggerV1 | undefined,
-  requestId: string,
-  serialResults: Record<string, any>[],
-  runtimeOptions?: Pick<
-    DispatchInput,
-    'context_cursor' | 'job_type' | 'writeback_policy' | 'rederive_options'
-  >,
-  abortSignal?: AbortSignal,
-  isCancelled?: () => boolean,
-  onProgress?: (update: WorkflowProgressUpdate) => void,
+type ExecuteFlowRuntimeOptions = Pick<
+  DispatchInput,
+  'context_cursor' | 'job_type' | 'writeback_policy' | 'rederive_options'
+>;
+
+type ExecuteFlowAttemptOptions = {
+  settings: EwSettings;
+  flow: EwFlowConfig;
+  flowOrder: number;
+  messageId: number;
+  userInput: string | undefined;
+  trigger: FlowTriggerV1 | undefined;
+  requestId: string;
+  serialResults: Record<string, any>[];
+  runtimeOptions?: ExecuteFlowRuntimeOptions;
+  abortSignal?: AbortSignal;
+  isCancelled?: () => boolean;
+  onProgress?: (update: WorkflowProgressUpdate) => void;
+};
+
+async function executeFlowAttemptInternal(
+  options: ExecuteFlowAttemptOptions,
 ): Promise<DispatchFlowAttempt> {
+  const {
+    settings,
+    flow,
+    flowOrder,
+    messageId,
+    userInput,
+    trigger,
+    requestId,
+    serialResults,
+    runtimeOptions,
+    abortSignal,
+    isCancelled,
+    onProgress,
+  } = options;
+
   const startedAt = Date.now();
   throwIfDispatchAborted(abortSignal, isCancelled);
   const apiPreset = resolveApiPreset(settings, flow);
@@ -1360,6 +1382,115 @@ async function executeFlow(
       elapsed_ms: Date.now() - startedAt,
     };
   }
+}
+
+async function executeFlow(
+  settings: EwSettings,
+  flow: EwFlowConfig,
+  flowOrder: number,
+  messageId: number,
+  userInput: string | undefined,
+  trigger: FlowTriggerV1 | undefined,
+  requestId: string,
+  serialResults: Record<string, any>[],
+  runtimeOptions?: ExecuteFlowRuntimeOptions,
+  abortSignal?: AbortSignal,
+  isCancelled?: () => boolean,
+  onProgress?: (update: WorkflowProgressUpdate) => void,
+): Promise<DispatchFlowAttempt> {
+  const firstAttempt = await executeFlowAttemptInternal({
+    settings,
+    flow,
+    flowOrder,
+    messageId,
+    userInput,
+    trigger,
+    requestId,
+    serialResults,
+    runtimeOptions,
+    abortSignal,
+    isCancelled,
+    onProgress,
+  });
+
+  if (
+    firstAttempt.ok ||
+    !isJsonObjectStructuredOutputMode(flow.behavior_options.structured_output) ||
+    !isLikelyStructuredOutputUnsupportedError(firstAttempt.error)
+  ) {
+    return firstAttempt;
+  }
+
+  console.warn(
+    `[EW] Flow "${flow.id}": structured output unsupported, retrying with structured_output=off — ${firstAttempt.error}`,
+  );
+  onProgress?.({
+    phase: 'dispatching',
+    request_id: requestId,
+    flow_id: flow.id,
+    flow_name: flow.name,
+    flow_order: flowOrder,
+    message: flow.name.trim()
+      ? `工作流「${flow.name}」的结构化输出不被当前模型支持，已自动降级为普通请求并重试…`
+      : `工作流 ${flow.id} 的结构化输出不被当前模型支持，已自动降级为普通请求并重试…`,
+  });
+
+  const fallbackFlow: EwFlowConfig = {
+    ...flow,
+    behavior_options: {
+      ...flow.behavior_options,
+      structured_output: 'off',
+    },
+  };
+  const fallbackAttempt = await executeFlowAttemptInternal({
+    settings,
+    flow: fallbackFlow,
+    flowOrder,
+    messageId,
+    userInput,
+    trigger,
+    requestId,
+    serialResults,
+    runtimeOptions,
+    abortSignal,
+    isCancelled,
+    onProgress,
+  });
+
+  const fallbackMeta = {
+    from: flow.behavior_options.structured_output,
+    to: 'off',
+    reason: 'structured_output_unsupported',
+    original_error: firstAttempt.error ?? 'structured output unsupported',
+    retried: true,
+    retry_ok: fallbackAttempt.ok,
+  };
+
+  fallbackAttempt.request_debug = {
+    ...(fallbackAttempt.request_debug ?? {
+      flow_request: fallbackAttempt.request,
+    }),
+    structured_output_fallback: fallbackMeta,
+    structured_output_original_attempt: {
+      request_debug: firstAttempt.request_debug,
+      error: firstAttempt.error,
+      error_code: firstAttempt.error_code,
+      error_stage: firstAttempt.error_stage,
+    },
+  };
+
+  if (fallbackAttempt.ok) {
+    return {
+      ...fallbackAttempt,
+      flow,
+    };
+  }
+
+  return {
+    ...fallbackAttempt,
+    flow,
+    error: `${fallbackAttempt.error ?? `[${flow.id}] failed`} (structured output auto-fallback also failed; original error: ${firstAttempt.error ?? 'unknown'})`,
+  };
 }
 
 export async function dispatchFlows(input: DispatchInput): Promise<DispatchFlowsOutput> {

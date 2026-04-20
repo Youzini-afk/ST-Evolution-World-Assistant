@@ -26,7 +26,10 @@ import {
 } from '../src/runtime/pipeline';
 import { isSnapshotResolutionUnsafeForDestructiveWriteForTest } from '../src/runtime/floor-binding';
 import { applyLocalWorkflowRegexForTest, applyTavernRegexFallbackForTest } from '../src/runtime/regex-engine';
-import { buildStructuredOutputRequestAugment } from '../src/runtime/structured-output';
+import {
+  buildStructuredOutputRequestAugment,
+  isLikelyStructuredOutputUnsupportedError,
+} from '../src/runtime/structured-output';
 import {
   clearDryRunPromptPreview,
   clearSendIntent,
@@ -374,6 +377,39 @@ function validateStructuredOutputAugment(): void {
   assert.equal(offAugment.transportMode, 'off');
 }
 
+function validateStructuredOutputFallbackDetection(): void {
+  assert.equal(
+    isLikelyStructuredOutputUnsupportedError(
+      '[flow_a] 上游 API 请求失败：response_format of type json_object is not supported with this model (unsupported_parameter)',
+    ),
+    true,
+  );
+  assert.equal(
+    isLikelyStructuredOutputUnsupportedError(
+      '[flow_b] 上游 API 请求失败：json_schema is not available for this endpoint',
+    ),
+    true,
+  );
+  assert.equal(
+    isLikelyStructuredOutputUnsupportedError(
+      '[flow_c] ST backend error: 400 Structured Outputs are only supported on selected models',
+    ),
+    true,
+  );
+  assert.equal(
+    isLikelyStructuredOutputUnsupportedError(
+      '[flow_d] 上游 API 请求失败：temperature must be between 0 and 2',
+    ),
+    false,
+  );
+  assert.equal(
+    isLikelyStructuredOutputUnsupportedError(
+      '[flow_e] response_format supplied but request timed out before upstream returned any body',
+    ),
+    false,
+  );
+}
+
 function validateWorkflowRegexPipeline(): void {
   const localRegex = applyLocalWorkflowRegexForTest(
     'Alpha Beta',
@@ -599,6 +635,7 @@ function main(): void {
   validateSnapshotResolutionSafety();
   validateMessageVersioningPrefersRawMessage();
   validateStructuredOutputAugment();
+  validateStructuredOutputFallbackDetection();
   validateWorkflowRegexPipeline();
   validateRuntimeTriggerGuards();
   validatePromptViewerSyntheticGenerationGuard();
