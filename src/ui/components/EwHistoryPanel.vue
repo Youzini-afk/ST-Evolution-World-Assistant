@@ -417,7 +417,7 @@ const timelineBuildResult = computed<TimelineBuildResult>(() => {
       };
     } else if (role === 'user') {
       const nextFloor = store.floorSnapshots[index + 1];
-      const nextRuntimeMeta = nextFloor ? floorRuntimeMap.value.get(nextFloor.messageId) : null;
+      const nextRuntimeMeta = nextFloor ? readFloorRuntimeMeta(nextFloor.messageId, warnings) : null;
       const nextRole = nextRuntimeMeta?.role ?? 'other';
       const nextHasSnapshot = Boolean(nextFloor?.snapshot);
       if (nextFloor && nextRole === 'assistant' && nextHasSnapshot) {
