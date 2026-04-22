@@ -647,6 +647,28 @@ function buildGenerateRawCustomApi(
   };
 }
 
+function buildGenerateRawInvocation(
+  flow: Pick<EwFlowConfig, 'behavior_options'>,
+  orderedPrompts: Array<{ role: 'system' | 'assistant' | 'user'; content: string }>,
+  extras: Record<string, any> = {},
+): Record<string, any> {
+  return {
+    ...extras,
+    prompt: orderedPrompts,
+    ...(isJsonObjectStructuredOutputMode(flow.behavior_options.structured_output)
+      ? { jsonSchema: buildJsonObjectStructuredSchema() }
+      : {}),
+  };
+}
+
+export function buildGenerateRawInvocationForTest(
+  flow: Pick<EwFlowConfig, 'behavior_options'>,
+  orderedPrompts: Array<{ role: 'system' | 'assistant' | 'user'; content: string }>,
+  extras: Record<string, any> = {},
+): Record<string, any> {
+  return buildGenerateRawInvocation(flow, orderedPrompts, extras);
+}
+
 function parseJsonFromText(rawText: string, flowId: string): Record<string, any> {
   const preview = rawText.slice(0, 300);
 
@@ -864,15 +886,13 @@ async function executeFlowViaLlmConnector(
       : null;
 
   try {
-    const rawText = await generateRawFn({
-      generation_id: generationId,
-      should_stream: flow.generation_options.stream,
-      should_silence: true,
-      ordered_prompts: orderedPrompts,
-      ...(isJsonObjectStructuredOutputMode(flow.behavior_options.structured_output)
-        ? { jsonSchema: buildJsonObjectStructuredSchema() }
-        : {}),
-    });
+    const rawText = await generateRawFn(
+      buildGenerateRawInvocation(flow, orderedPrompts, {
+        generation_id: generationId,
+        should_stream: flow.generation_options.stream,
+        should_silence: true,
+      }),
+    );
 
     throwIfDispatchAborted(abortSignal, isCancelled);
 
@@ -937,16 +957,14 @@ async function executeFlowViaGenerateRawCustomApi(
       : null;
 
   try {
-    const rawText = await generateRawFn({
-      generation_id: generationId,
-      should_stream: flow.generation_options.stream,
-      should_silence: true,
-      custom_api: customApi,
-      ordered_prompts: orderedPrompts,
-      ...(isJsonObjectStructuredOutputMode(flow.behavior_options.structured_output)
-        ? { jsonSchema: buildJsonObjectStructuredSchema() }
-        : {}),
-    });
+    const rawText = await generateRawFn(
+      buildGenerateRawInvocation(flow, orderedPrompts, {
+        generation_id: generationId,
+        should_stream: flow.generation_options.stream,
+        should_silence: true,
+        custom_api: customApi,
+      }),
+    );
 
     throwIfDispatchAborted(abortSignal, isCancelled);
 
@@ -1257,13 +1275,15 @@ async function executeFlowAttemptInternal(
           isCancelled,
         );
       } else {
+        const generateRawRequest = buildGenerateRawInvocation(flow, orderedPrompts, {
+          generation_id: generationId,
+          should_stream: streamEnabled,
+          should_silence: true,
+        });
         requestDebug = {
           ...requestDebugBase,
           transport_request: {
-            generation_id: generationId,
-            should_stream: streamEnabled,
-            should_silence: true,
-            ordered_prompts: orderedPrompts,
+            ...generateRawRequest,
           },
         };
         response = await executeFlowViaLlmConnector(
@@ -1292,14 +1312,16 @@ async function executeFlowAttemptInternal(
         );
       } else {
         try {
+          const generateRawRequest = buildGenerateRawInvocation(flow, orderedPrompts, {
+            generation_id: generationId,
+            should_stream: streamEnabled,
+            should_silence: true,
+            custom_api: buildGenerateRawCustomApi(apiPreset, flow),
+          });
           requestDebug = {
             ...requestDebugBase,
             transport_request: {
-              generation_id: generationId,
-              should_stream: streamEnabled,
-              should_silence: true,
-              custom_api: buildGenerateRawCustomApi(apiPreset, flow),
-              ordered_prompts: orderedPrompts,
+              ...generateRawRequest,
             },
           };
           response = await executeFlowViaGenerateRawCustomApi(

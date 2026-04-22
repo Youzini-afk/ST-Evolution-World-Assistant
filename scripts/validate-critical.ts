@@ -26,6 +26,7 @@ import {
 } from '../src/runtime/pipeline';
 import { isSnapshotResolutionUnsafeForDestructiveWriteForTest } from '../src/runtime/floor-binding';
 import { applyLocalWorkflowRegexForTest, applyTavernRegexFallbackForTest } from '../src/runtime/regex-engine';
+import { buildGenerateRawInvocationForTest } from '../src/runtime/dispatcher';
 import {
   buildStructuredOutputRequestAugment,
   isLikelyStructuredOutputUnsupportedError,
@@ -625,6 +626,31 @@ function validateApiSourceCompatibility(): void {
   assert.equal(getApiSourceDefinition('groq').transport, 'custom_headers');
 }
 
+function validateGenerateRawInvocationUsesPromptMessages(): void {
+  const orderedPrompts = [
+    { role: 'system', content: 'worldInfoBefore block' },
+    { role: 'system', content: 'charDescription' },
+    { role: 'user', content: '{"hello":"world"}' },
+  ] as const;
+  const invocation = buildGenerateRawInvocationForTest(
+    {
+      behavior_options: {
+        structured_output: 'off',
+      },
+    } as any,
+    [...orderedPrompts],
+    {
+      generation_id: 'req:flow',
+      should_stream: false,
+      should_silence: true,
+    },
+  );
+
+  assert.deepEqual(invocation.prompt, orderedPrompts);
+  assert.equal('ordered_prompts' in invocation, false);
+  assert.equal(invocation.generation_id, 'req:flow');
+}
+
 function main(): void {
   validateSharedSettingsSanitization();
   validateExtensionBucketFallback();
@@ -640,6 +666,7 @@ function main(): void {
   validateRuntimeTriggerGuards();
   validatePromptViewerSyntheticGenerationGuard();
   validateApiSourceCompatibility();
+  validateGenerateRawInvocationUsesPromptMessages();
   console.log('validate:critical passed');
 }
 
