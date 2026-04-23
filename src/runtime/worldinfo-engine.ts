@@ -824,6 +824,7 @@ export async function resolveWorldInfo(_settings: EwSettings, chatMessages: stri
 
     // 4. Build render context (for EJS getwi calls)
     const allForGetwi = allEntries.map(e => ({
+      uid: e.uid,
       name: e.name,
       comment: e.comment,
       content: e.cleanContent || e.content,

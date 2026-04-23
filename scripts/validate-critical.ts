@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+import assert from 'assert/strict';
 
 import { getExtensionSettingsBucketScore, shouldUseLegacySettingsBucket } from '../src/st-adapter';
 import {
@@ -548,7 +548,7 @@ function validatePromptViewerSyntheticGenerationGuard(): void {
           },
         ];
       },
-    };
+    } as any;
 
     assert.equal(isTavernHelperPromptViewerRefreshActive(), true);
     assert.equal(hasFreshSendIntent(), false);
@@ -651,7 +651,91 @@ function validateGenerateRawInvocationUsesPromptMessages(): void {
   assert.equal(invocation.generation_id, 'req:flow');
 }
 
-function main(): void {
+function installMinimalEjsRuntimeGlobals(): () => void {
+  const previousWindow = (globalThis as any).window;
+  const previousParent = (globalThis as any).parent;
+  const previousLodash = (globalThis as any)._;
+  const previousEjs = (globalThis as any).ejs;
+
+  const cloneDeep = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+  const isPlainObject = (value: unknown): value is Record<string, any> =>
+    Object.prototype.toString.call(value) === '[object Object]';
+  const get = (value: any, path: string, defaults?: unknown): any => {
+    if (!path) {
+      return value ?? defaults;
+    }
+    const result = String(path)
+      .split('.')
+      .reduce((acc, part) => (acc == null ? undefined : acc[part]), value);
+    return result === undefined ? defaults : result;
+  };
+  const merge = (target: any, ...sources: any[]): any => {
+    const output: Record<string, any> = isPlainObject(target) ? { ...target } : {};
+    for (const source of sources) {
+      if (!isPlainObject(source) && !Array.isArray(source)) {
+        continue;
+      }
+      for (const [key, value] of Object.entries(source)) {
+        if (Array.isArray(value)) {
+          output[key] = cloneDeep(value);
+        } else if (isPlainObject(value)) {
+          output[key] = merge(isPlainObject(output[key]) ? output[key] : {}, value);
+        } else {
+          output[key] = value;
+        }
+      }
+    }
+    return output;
+  };
+
+  (globalThis as any).window = globalThis as any;
+  (globalThis as any).parent = globalThis as any;
+  (globalThis as any)._ = {
+    cloneDeep,
+    get,
+    isPlainObject,
+    merge,
+  };
+  (globalThis as any).ejs = {
+    compile(template: string) {
+      return async function compiled(locals: Record<string, any>) {
+        return template.replace(/<%=\s*([\s\S]+?)\s*%>/g, (_match: string, expression: string) => {
+          try {
+            const fn = new Function('locals', `with (locals) { return (${expression}); }`);
+            const value = fn(locals);
+            return value == null ? '' : String(value);
+          } catch {
+            return '';
+          }
+        });
+      };
+    },
+  };
+
+  return () => {
+    (globalThis as any).window = previousWindow;
+    (globalThis as any).parent = previousParent;
+    (globalThis as any)._ = previousLodash;
+    (globalThis as any).ejs = previousEjs;
+  };
+}
+
+async function validateRenderEjsContentInjectsTemplateContext(): Promise<void> {
+  const restore = installMinimalEjsRuntimeGlobals();
+  try {
+    const { renderEjsContent } = await import('../src/runtime/ejs-internal');
+    const rendered = await renderEjsContent('<%= user_input %> / <%= request?.foo ?? "" %>', {
+      user_input: 'hello-user',
+      request: { foo: 'bar-value' },
+    });
+
+    assert.equal(rendered, 'hello-user / bar-value');
+  } finally {
+    restore();
+  }
+}
+
+async function main(): Promise<void> {
   validateSharedSettingsSanitization();
   validateExtensionBucketFallback();
   validateDebugRedaction();
@@ -667,7 +751,8 @@ function main(): void {
   validatePromptViewerSyntheticGenerationGuard();
   validateApiSourceCompatibility();
   validateGenerateRawInvocationUsesPromptMessages();
+  await validateRenderEjsContentInjectsTemplateContext();
   console.log('validate:critical passed');
 }
 
-main();
+void main();
