@@ -1,3 +1,4 @@
+import { readExtensionSettings } from '../st-adapter';
 import { validateEjsTemplate } from './controller-renderer';
 import { rederiveWorkflowAtFloor, rerollCurrentAfterReplyWorkflow } from './events';
 import { localizeSnapshotsForCurrentChat } from './floor-binding';
@@ -11,49 +12,53 @@ import { getWorldbook, replaceWorldbook } from './compat/worldbook';
 import { getChatMessages, getLastMessageId, getChatId } from './compat/character';
 import { klona } from 'klona';
 
+// EvolutionWorldAPI 的权威定义。declare global 和 initGlobalApi 共用同一个 interface，
+// 避免之前两份签名漂移、要改字段得改两遍的问题。
+export interface EvolutionWorldAPI {
+  getConfig: () => ReturnType<typeof getSettings>;
+  setConfig: (partial: Partial<ReturnType<typeof getSettings>>) => Promise<void>;
+  validateConfig: () => { ok: boolean; errors: string[] };
+  runNow: (message?: string) => Promise<{ ok: boolean; reason?: string }>;
+  getLastRun: () => ReturnType<typeof getLastRun>;
+  getLastIo: () => ReturnType<typeof getLastIo>;
+  validateControllerSyntax: () => Promise<{ ok: boolean; reason?: string }>;
+  rollbackController: () => Promise<{ ok: boolean; reason?: string }>;
+  rerollCurrentAfterReply: () => Promise<{ ok: boolean; reason?: string }>;
+  rederiveWorkflowAtFloor: (input: {
+    message_id: number;
+    timing: 'before_reply' | 'after_reply' | 'manual';
+    target_version_key?: string;
+    confirm_legacy?: boolean;
+    capsule_mode?: 'full' | 'light';
+  }) => Promise<{
+    ok: boolean;
+    reason?: string;
+    result?: {
+      message_id: number;
+      anchor_message_id: number;
+      legacy_approx: boolean;
+      writeback_applied: number;
+      writeback_conflicts: number;
+      writeback_conflict_names: string[];
+    };
+  }>;
+  localizeSnapshots: () => Promise<{
+    ok: boolean;
+    reason?: string;
+    result?: {
+      localized: number;
+      uplifted: number;
+      unresolved: number;
+      skipped: number;
+      mutated_messages: number;
+      warnings: string[];
+    };
+  }>;
+}
+
 declare global {
   interface Window {
-    EvolutionWorldAPI?: {
-      getConfig: () => ReturnType<typeof getSettings>;
-      setConfig: (partial: Partial<ReturnType<typeof getSettings>>) => Promise<void>;
-      validateConfig: () => { ok: boolean; errors: string[] };
-      runNow: (message?: string) => Promise<{ ok: boolean; reason?: string }>;
-      getLastRun: () => ReturnType<typeof getLastRun>;
-      getLastIo: () => ReturnType<typeof getLastIo>;
-      validateControllerSyntax: () => Promise<{ ok: boolean; reason?: string }>;
-      rollbackController: () => Promise<{ ok: boolean; reason?: string }>;
-      rerollCurrentAfterReply: () => Promise<{ ok: boolean; reason?: string }>;
-      rederiveWorkflowAtFloor: (input: {
-        message_id: number;
-        timing: 'before_reply' | 'after_reply' | 'manual';
-        target_version_key?: string;
-        confirm_legacy?: boolean;
-        capsule_mode?: 'full' | 'light';
-      }) => Promise<{
-        ok: boolean;
-        reason?: string;
-        result?: {
-          message_id: number;
-          anchor_message_id: number;
-          legacy_approx: boolean;
-          writeback_applied: number;
-          writeback_conflicts: number;
-          writeback_conflict_names: string[];
-        };
-      }>;
-      localizeSnapshots: () => Promise<{
-        ok: boolean;
-        reason?: string;
-        result?: {
-          localized: number;
-          uplifted: number;
-          unresolved: number;
-          skipped: number;
-          mutated_messages: number;
-          warnings: string[];
-        };
-      }>;
-    };
+    EvolutionWorldAPI?: EvolutionWorldAPI;
   }
 }
 
@@ -157,13 +162,31 @@ async function rollbackController(): Promise<{ ok: boolean; reason?: string }> {
 }
 
 export function initGlobalApi() {
-  window.EvolutionWorldAPI = {
+  const api: EvolutionWorldAPI = {
     getConfig: () => getSettings(),
     setConfig: async partial => {
       patchSettings(partial);
     },
     validateConfig: () => {
-      const result = EwSettingsSchema.safeParse(getSettings());
+      // 旧实现是 parse(getSettings())，但 getSettings() 已经 normalize 过，
+      // 必然通过校验，等同于无效校验。改成读 raw bucket 里的 settings 字段。
+      let rawSettings: unknown = null;
+      try {
+        const bucket = readExtensionSettings();
+        rawSettings = (bucket && typeof bucket === 'object' ? (bucket as Record<string, unknown>).settings : null) ?? null;
+      } catch (error) {
+        return {
+          ok: false,
+          errors: [`failed to read raw settings: ${error instanceof Error ? error.message : String(error)}`],
+        };
+      }
+
+      if (rawSettings == null) {
+        // 没存过 raw settings 也算「合法」：normalizeSettings 会用全默认值兜底
+        return { ok: true, errors: [] };
+      }
+
+      const result = EwSettingsSchema.safeParse(rawSettings);
       if (result.success) {
         return { ok: true, errors: [] };
       }
@@ -199,6 +222,7 @@ export function initGlobalApi() {
       }
     },
   };
+  window.EvolutionWorldAPI = api;
 }
 
 export function disposeGlobalApi() {

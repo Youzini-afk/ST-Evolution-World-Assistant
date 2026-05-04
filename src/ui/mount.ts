@@ -9,7 +9,9 @@
 
 import { createApp, type App as VueApp } from 'vue';
 import { createPinia } from 'pinia';
-import { getSettings, patchSettings } from '../runtime/settings';
+import { getCurrentChatIdSafe } from '../st-adapter';
+import { getLastRun, getSettings, patchSettings, subscribeLastRun } from '../runtime/settings';
+import type { RunSummary } from '../runtime/types';
 import { getFabVisibilityEventName } from './fab-bridge';
 import { showEwNotice } from './notice';
 import AppComponent from './App.vue';
@@ -35,6 +37,9 @@ let fabViewportSyncScrollHandler: (() => void) | null = null;
 let fabViewportSyncResizeHandler: (() => void) | null = null;
 let fabViewportSyncRaf: number | null = null;
 let fabVisibilityBridgeHandler: ((event: Event) => void) | null = null;
+let stopRunListener: (() => void) | null = null;
+// 用 baselineRequestId 跳过启动时已存在的 lastRun，避免每次刷新都弹一次旧通知
+let runNotifyBaselineRequestId = '';
 
 // ── 工具函数 ──────────────────────────────────────────
 
@@ -195,6 +200,36 @@ function ensureFabStyle(): void {
 @keyframes ew-fab-ring-pulse {
   0%, 100% { opacity: 0.4; transform: scale(1); }
   50% { opacity: 0.8; transform: scale(1.08); }
+}
+#${FAB_ID}[data-run-state="success"] {
+  border-color: rgba(101, 211, 156, 0.65);
+  box-shadow:
+    0 4px 24px rgba(101, 211, 156, 0.32),
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    inset 0 1px 1px rgba(255, 255, 255, 0.1);
+}
+#${FAB_ID}[data-run-state="success"]::after {
+  border-color: rgba(101, 211, 156, 0.4);
+}
+#${FAB_ID}[data-run-state="warning"] {
+  border-color: rgba(234, 185, 111, 0.65);
+  box-shadow:
+    0 4px 24px rgba(234, 185, 111, 0.32),
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    inset 0 1px 1px rgba(255, 255, 255, 0.1);
+}
+#${FAB_ID}[data-run-state="warning"]::after {
+  border-color: rgba(234, 185, 111, 0.4);
+}
+#${FAB_ID}[data-run-state="error"] {
+  border-color: rgba(245, 123, 143, 0.65);
+  box-shadow:
+    0 4px 24px rgba(245, 123, 143, 0.32),
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    inset 0 1px 1px rgba(255, 255, 255, 0.1);
+}
+#${FAB_ID}[data-run-state="error"]::after {
+  border-color: rgba(245, 123, 143, 0.4);
 }
 `;
   (document.head ?? document.documentElement).appendChild(style);
@@ -452,6 +487,104 @@ function uninstallFabVisibilityBridge(): void {
 }
 
 // ═══════════════════════════════════════════════════════
+// ── 运行结果反馈：浮动球状态色 + 完成时 toast ──
+// ═══════════════════════════════════════════════════════
+
+type RunOutcome = 'success' | 'warning' | 'error';
+
+function classifyRunOutcome(summary: RunSummary): RunOutcome {
+  if (!summary.ok) {
+    return 'error';
+  }
+  // 命中目标但没有实际写回（空操作 / 仅 Controller 变化无 Dyn 更新等）→ warning
+  if (summary.warning) {
+    return 'warning';
+  }
+  const commit = summary.commit;
+  if (commit && commit.effective_change_count === 0 && !summary.reason?.trim()) {
+    return 'warning';
+  }
+  return 'success';
+}
+
+function updateFabRunState(outcome: RunOutcome): void {
+  const fab = document.getElementById(FAB_ID);
+  if (!fab) {
+    return;
+  }
+  fab.dataset.runState = outcome;
+}
+
+function buildOutcomeNotice(summary: RunSummary, outcome: RunOutcome) {
+  const elapsedSec = Math.max(0, Math.round(((summary.elapsed_ms ?? 0) / 1000) * 10) / 10);
+  const flowCount = Math.max(0, Math.trunc(Number(summary.flow_count ?? 0) || 0));
+  const commit = summary.commit;
+  const dynChange = commit
+    ? commit.dyn_entries_created + commit.dyn_entries_updated + commit.dyn_entries_removed
+    : 0;
+  const ctrlChange = commit?.controller_entries_updated ?? 0;
+
+  if (outcome === 'success') {
+    const detailBits: string[] = [];
+    if (dynChange > 0) {
+      detailBits.push(`动态条目变化 ${dynChange}`);
+    }
+    if (ctrlChange > 0) {
+      detailBits.push(`控制器更新 ${ctrlChange}`);
+    }
+    detailBits.push(`耗时 ${elapsedSec}s`);
+    return {
+      title: 'Evolution World',
+      message: `工作流已更新（${flowCount} 条）。${detailBits.join('，')}`,
+      level: 'success' as const,
+      duration_ms: 3500,
+    };
+  }
+
+  if (outcome === 'warning') {
+    const reason = summary.warning?.summary?.trim()
+      || (commit && commit.effective_change_count === 0 ? '本轮命中工作流但没有实际写回，可重 roll 试试' : '本轮工作流以空操作完成');
+    return {
+      title: 'Evolution World',
+      message: `${reason}。耗时 ${elapsedSec}s`,
+      level: 'warning' as const,
+      duration_ms: 5000,
+    };
+  }
+
+  const failReason = summary.failure?.summary?.trim() || summary.reason?.trim() || '工作流执行失败';
+  return {
+    title: 'Evolution World',
+    message: `${failReason}。耗时 ${elapsedSec}s`,
+    level: 'error' as const,
+    duration_ms: 6000,
+  };
+}
+
+function notifyRunOutcome(summary: RunSummary | null) {
+  if (!summary) {
+    return;
+  }
+
+  // 跳过 baseline（启动时已存在的旧 run，刷新页面也不应再弹一次）
+  const requestId = String(summary.request_id ?? '').trim();
+  if (!requestId || requestId === runNotifyBaselineRequestId) {
+    return;
+  }
+  runNotifyBaselineRequestId = requestId;
+
+  // 只对当前聊天的 run 反馈
+  const currentChat = getCurrentChatIdSafe();
+  if (currentChat && currentChat !== 'unknown' && summary.chat_id?.trim() && summary.chat_id.trim() !== currentChat) {
+    return;
+  }
+
+  const outcome = classifyRunOutcome(summary);
+  updateFabRunState(outcome);
+  showEwNotice(buildOutcomeNotice(summary, outcome));
+}
+
+// ═══════════════════════════════════════════════════════
 // ── 主 UI 挂载 ──
 // ═══════════════════════════════════════════════════════
 
@@ -491,6 +624,17 @@ export function mountUI(): void {
     setFabVisibility(true);
   }
 
+  // 4. 订阅运行结果，让浮动球状态色 + 完成时 toast 跟着最新 lastRun 走
+  const initialRun = getLastRun();
+  runNotifyBaselineRequestId = String(initialRun?.request_id ?? '').trim();
+  if (initialRun) {
+    updateFabRunState(classifyRunOutcome(initialRun));
+  }
+  stopRunListener?.();
+  stopRunListener = subscribeLastRun(next => {
+    notifyRunOutcome(next);
+  }).stop;
+
   console.info('[Evolution World] Vue UI + FAB + Wand 已挂载');
 }
 
@@ -501,6 +645,9 @@ export function unmountUI(): void {
   uninstallMagicWandMenuItem();
   uninstallFabVisibilityBridge();
   removeFab();
+  stopRunListener?.();
+  stopRunListener = null;
+  runNotifyBaselineRequestId = '';
 
   app?.unmount();
   app = null;

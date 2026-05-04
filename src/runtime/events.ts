@@ -194,7 +194,31 @@ let lastObservedGenerationEndedSeq = 0;
 const MIN_BEFORE_REPLY_INTERVAL_MS = 2500;
 const MIN_AFTER_REPLY_INTERVAL_MS = 3000;
 const AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_POLL_MS = 250;
-const AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MS = 12000;
+const AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MIN_MS = 12000;
+const AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MAX_MS = 60000;
+
+/**
+ * 计算 after_reply 在等不到 GENERATION_ENDED 时的兜底超时。
+ * 从 settings.total_timeout_ms 派生（约 1/4），让慢模型 / 公益反代 / 大上下文有足够缓冲，
+ * 同时夹在 12s ~ 60s 区间避免极端值。
+ */
+function resolveAfterReplyMessageReceivedFallbackTimeoutMs(): number {
+  try {
+    const totalTimeout = Number(getSettings().total_timeout_ms ?? 0);
+    if (Number.isFinite(totalTimeout) && totalTimeout > 0) {
+      return Math.max(
+        AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MIN_MS,
+        Math.min(
+          AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MAX_MS,
+          Math.round(totalTimeout / 4),
+        ),
+      );
+    }
+  } catch {
+    // 取不到 settings 就用最小值兜底
+  }
+  return AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MIN_MS;
+}
 let runtimeEventsInitialized = false;
 const NON_SEND_GENERATION_TYPES = new Set(["continue", "regenerate", "swipe"]);
 const WORKFLOW_NOTICE_COLLAPSE_MS = 5000;
@@ -3323,14 +3347,14 @@ function scheduleAfterReplyFromMessageReceived(
     }
 
     const generationEnded = hasObservedGenerationEndForSeq(expectedGenerationSeq);
-    const timedOut =
-      Date.now() - startedAt >= AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MS;
+    const fallbackTimeoutMs = resolveAfterReplyMessageReceivedFallbackTimeoutMs();
+    const timedOut = Date.now() - startedAt >= fallbackTimeoutMs;
 
     if (generationEnded || timedOut) {
       pendingAfterReplyMessageReceivedFallbacks.delete(messageId);
       if (timedOut) {
         console.debug(
-          `[Evolution World] after_reply fallback waited ${AFTER_REPLY_MESSAGE_RECEIVED_FALLBACK_TIMEOUT_MS}ms without GENERATION_ENDED, using delayed message_received path for assistant floor #${messageId}`,
+          `[Evolution World] after_reply fallback waited ${fallbackTimeoutMs}ms without GENERATION_ENDED, using delayed message_received path for assistant floor #${messageId}`,
         );
       }
       void onAfterReplyMessage(

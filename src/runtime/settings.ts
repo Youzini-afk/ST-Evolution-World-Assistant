@@ -629,12 +629,26 @@ export function loadLastIoForChat(chatId: string): LastIoSummary | null {
   return null;
 }
 
+function resolveControllerBackupLimit(): number {
+  // 用户可在 settings.controller_backup_limit 调整保留量；默认 10，schema 强制 [1, 100]
+  const fallback = 10;
+  try {
+    const value = Number(cachedSettings?.controller_backup_limit ?? fallback);
+    if (Number.isFinite(value) && value >= 1) {
+      return Math.max(1, Math.min(100, Math.floor(value)));
+    }
+  } catch {
+    // 取不到 cachedSettings 就用默认
+  }
+  return fallback;
+}
+
 export function saveControllerBackup(
   chatId: string,
   worldbookName: string,
   controllerContent: ControllerEntrySnapshot[],
 ) {
-  const MAX_BACKUPS = 10;
+  const maxBackups = resolveControllerBackupLimit();
   writeScriptStorage(previous => {
     const backups = { ...(previous.backups ?? {}) };
     backups[chatId] = {
@@ -643,11 +657,11 @@ export function saveControllerBackup(
       controller_content: controllerContent,
     };
 
-    // CR-4: LRU 淘汰 —— 仅保留最近的 MAX_BACKUPS 条记录。
+    // CR-4: LRU 淘汰 —— 仅保留最近的 maxBackups 条记录。
     const entries = Object.entries(backups);
-    if (entries.length > MAX_BACKUPS) {
+    if (entries.length > maxBackups) {
       entries.sort((a, b) => (b[1].at ?? 0) - (a[1].at ?? 0));
-      const keysToRemove = entries.slice(MAX_BACKUPS).map(e => e[0]);
+      const keysToRemove = entries.slice(maxBackups).map(e => e[0]);
       for (const key of keysToRemove) {
         delete backups[key];
       }

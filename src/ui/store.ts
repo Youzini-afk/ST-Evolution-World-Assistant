@@ -48,13 +48,13 @@ import {
   type ControllerEntrySnapshot,
   type DynSnapshot,
 } from '../runtime/types';
-import { getCurrentChatIdSafe as getHostCurrentChatIdSafe } from '../st-adapter';
+import { getCurrentChatIdSafe as getHostCurrentChatIdSafe, onSTEvent } from '../st-adapter';
 import { convertStPresetToFlow, isSillyTavernPreset } from './convertStPreset';
 import type { TabKey } from './help-meta';
 import { showEwNotice, showManagedWorkflowNotice, type EwWorkflowNoticeInput } from './notice';
 import { defineStore } from 'pinia';
 import { klona } from 'klona';
-import { onScopeDispose, ref, watch } from 'vue';
+import { computed, onScopeDispose, ref, watch } from 'vue';
 
 export const useEwStore = defineStore('evolution-world-store', () => {
   const settings = ref<EwSettings>(getSettings());
@@ -181,6 +181,20 @@ export const useEwStore = defineStore('evolution-world-store', () => {
     }
   });
 
+  // 订阅聊天切换 → 主动刷新角色卡级工作流，让总览/计数能立即反映新角色的 char-flows。
+  // 不依赖 UI 进入「工作流配置」Tab 才加载。
+  let stopChatChangedListener: (() => void) | null = null;
+  try {
+    stopChatChangedListener = onSTEvent('chatChanged', () => {
+      void loadCharFlows();
+    });
+  } catch (error) {
+    console.debug('[Evolution World] subscribe chatChanged failed:', error);
+  }
+
+  // 初始化时尝试加载一次 char-flows，避免首次打开总览看到 0
+  void loadCharFlows();
+
   // L-3: 当 store 的作用域被销毁时，正确清理订阅。
   onScopeDispose(() => {
     syncFromRuntime.stop();
@@ -188,6 +202,23 @@ export const useEwStore = defineStore('evolution-world-store', () => {
     syncIo.stop();
     clearScheduledPersist();
     clearCharFlowRefreshTimer();
+    stopChatChangedListener?.();
+  });
+
+  // 总览/统计应当包含「全局 + 角色卡级」两类工作流，避免只看到 0。
+  const effectiveFlowsCount = computed(() => {
+    const charIds = new Set(charFlows.value.map(flow => flow.id));
+    const globalCount = settings.value.flows.filter(flow => !charIds.has(flow.id)).length;
+    return globalCount + charFlows.value.length;
+  });
+
+  const effectiveEnabledFlowsCount = computed(() => {
+    const enabledChar = charFlows.value.filter(flow => flow.enabled);
+    const enabledCharIds = new Set(enabledChar.map(flow => flow.id));
+    const enabledGlobalUnique = settings.value.flows.filter(
+      flow => flow.enabled && !enabledCharIds.has(flow.id),
+    ).length;
+    return enabledGlobalUnique + enabledChar.length;
   });
 
   watch(
@@ -1312,6 +1343,8 @@ export const useEwStore = defineStore('evolution-world-store', () => {
     busy,
     executingFlowId,
     charFlows,
+    effectiveFlowsCount,
+    effectiveEnabledFlowsCount,
     activeCharName,
     flowScope,
     charFlowsLoading,

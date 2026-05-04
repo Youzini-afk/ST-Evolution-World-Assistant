@@ -400,18 +400,25 @@ function buildCommitSummary(
     }
   }
 
-  let controllerEntriesUpdated = 0;
+  let controllerEntriesCreated = 0;
+  let controllerEntriesChanged = 0;
+  let controllerEntriesRemoved = 0;
   for (const name of _.uniq([...beforeControllers.keys(), ...afterControllers.keys()])) {
     const before = beforeControllers.get(name);
     const after = afterControllers.get(name);
-    if (!before || !after) {
-      controllerEntriesUpdated += 1;
+    if (!before && after) {
+      controllerEntriesCreated += 1;
       continue;
     }
-    if (before.content !== after.content || before.enabled !== after.enabled) {
-      controllerEntriesUpdated += 1;
+    if (before && !after) {
+      controllerEntriesRemoved += 1;
+      continue;
+    }
+    if (before && after && (before.content !== after.content || before.enabled !== after.enabled)) {
+      controllerEntriesChanged += 1;
     }
   }
+  const controllerEntriesUpdated = controllerEntriesCreated + controllerEntriesChanged + controllerEntriesRemoved;
 
   const hasDynChanges = dynEntriesCreated + dynEntriesUpdated + dynEntriesRemoved > 0;
   const hasControllerChanges = controllerEntriesUpdated > 0;
@@ -431,6 +438,10 @@ function buildCommitSummary(
     dyn_entries_updated: dynEntriesUpdated,
     dyn_entries_removed: dynEntriesRemoved,
     controller_entries_requested: requestedControllerEntryCount,
+    controller_entries_created: controllerEntriesCreated,
+    controller_entries_changed: controllerEntriesChanged,
+    controller_entries_removed: controllerEntriesRemoved,
+    // 兼容字段：保留 controller_entries_updated 作为「controller 总变化数」
     controller_entries_updated: controllerEntriesUpdated,
     write_scope: writeScope,
     worldbook_verified: worldbookVerified,
@@ -561,6 +572,27 @@ export async function commitMergedPlan(
 
   if (commitSummary.effective_change_count > 0) {
     saveControllerBackup(chatId, target.worldbook_name, collectControllerBackupEntries(beforeEntries, settings));
+
+    // 诊断日志：用户反馈过「EWA 人设覆盖原人设」类问题，排查时需要看到最终写入的内容。
+    if (typeof console !== 'undefined' && console.debug) {
+      try {
+        const dynNames = nextEntries
+          .filter(entry => entry.name.startsWith(settings.dynamic_entry_prefix))
+          .map(entry => ({ name: entry.name, enabled: entry.enabled, content_len: entry.content.length }));
+        const ctrlNames = nextEntries
+          .filter(entry => entry.name.startsWith(settings.controller_entry_prefix))
+          .map(entry => ({ name: entry.name, enabled: entry.enabled, content_len: entry.content.length }));
+        console.debug('[EW Diagnose] commitMergedPlan about to write worldbook', {
+          target_worldbook: target.worldbook_name,
+          dyn_entries: dynNames,
+          controller_entries: ctrlNames,
+          commit_summary: commitSummary,
+        });
+      } catch {
+        // 诊断日志失败不应该影响主流程
+      }
+    }
+
     try {
       await replaceWorldbook(target.worldbook_name, nextEntries, { render: 'debounced' });
     } catch (error) {

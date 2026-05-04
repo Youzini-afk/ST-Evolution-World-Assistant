@@ -765,6 +765,31 @@ async function populateWorldInfoComponents(components: PromptComponents, setting
       ],
       note: `内置世界书引擎: ${resolved.after.length} 条 after 条目, ${resolved.atDepth.length} 条 atDepth 条目`,
     };
+
+    // 诊断日志：用户反馈过「EWA 人设覆盖原人设」类问题，排查时需要看到三个桶的实际名单。
+    if (typeof console !== 'undefined' && console.debug) {
+      try {
+        const summarize = (entries: typeof resolved.before) =>
+          entries.map(entry => ({
+            name: entry.name,
+            source_name: entry.source_name,
+            role: entry.role,
+            position: entry.position,
+            depth: entry.depth,
+            order: entry.order,
+            content_len: entry.content.length,
+          }));
+        console.debug('[EW Diagnose] populateWorldInfoComponents resolved', {
+          before: summarize(resolved.before),
+          after: summarize(resolved.after),
+          atDepth: summarize(resolved.atDepth),
+          controller_prefix: settings.controller_entry_prefix,
+          dynamic_prefix: settings.dynamic_entry_prefix,
+        });
+      } catch {
+        // 诊断日志失败不应该影响主流程
+      }
+    }
   } catch (e) {
     components.diagnostics.worldInfoBefore = appendDiagnosticNote(
       components.diagnostics.worldInfoBefore,
@@ -1156,6 +1181,11 @@ export async function assembleOrderedPrompts(
   // Deferred injections: prompts with in_chat position that go inside chat history
   const deferredInjections: Array<{ content: string; role: 'system' | 'user' | 'assistant'; depth: number }> = [];
   let chatHistoryStartIdx = -1;
+  // Fallback anchor when chatHistory marker is missing/disabled — points to the position
+  // right after the last marker-type entry has been emitted. This keeps deferred world-info /
+  // depth-injected content adjacent to the lore section instead of dumping them at the very end
+  // (which would otherwise overrun trailing user prompts like "output JSON format").
+  let lastMarkerEndIdx = -1;
 
   for (const content of components.beforePromptInjections) {
     if (content.trim()) {
@@ -1201,6 +1231,7 @@ export async function assembleOrderedPrompts(
             result.push({ role: msg.role, content: msg.content, name: msg.name });
           }
         }
+        lastMarkerEndIdx = result.length;
         continue;
       }
 
@@ -1213,6 +1244,7 @@ export async function assembleOrderedPrompts(
             result.push({ role: wi.role, content: `【${wi.name}】\n${wi.content}` });
           }
         }
+        lastMarkerEndIdx = result.length;
         continue;
       }
 
@@ -1223,6 +1255,7 @@ export async function assembleOrderedPrompts(
       if (content.trim()) {
         result.push({ role: entry.role, content });
       }
+      lastMarkerEndIdx = result.length;
     } else {
       // User-editable prompt — use entry.content, fallback to marker for 'main'
       const raw = entry.content.trim() || (entry.identifier === 'main' ? components.main : '');
@@ -1255,8 +1288,16 @@ export async function assembleOrderedPrompts(
       const insertIdx = Math.max(chatHistoryStartIdx, chatHistoryEndIdx - Math.min(depth, chatLen));
       result.splice(insertIdx, 0, { role, content });
     }
+  } else if (deferredInjections.length > 0 && lastMarkerEndIdx >= 0) {
+    // chatHistory marker missing/disabled — fall back to inserting right after the last marker.
+    // 按 depth 升序，从后往前 splice 保持顺序稳定。
+    deferredInjections.sort((a, b) => a.depth - b.depth);
+    for (let i = deferredInjections.length - 1; i >= 0; i--) {
+      const { role, content } = deferredInjections[i];
+      result.splice(lastMarkerEndIdx, 0, { role, content });
+    }
   } else if (deferredInjections.length > 0) {
-    // No chat history marker — append deferred items at the end
+    // No marker rendered at all — last-resort append.
     for (const { role, content } of deferredInjections) {
       result.push({ role, content });
     }

@@ -206,10 +206,37 @@ export function getExtensionSettingsBucketScore(bucket: unknown): number {
   );
 }
 
+/**
+ * 检查 bucket 里的 settings 是否已有用户实质配置（任何一条 flow 或 api preset）。
+ * 这种桶不应被旧桶覆盖 —— 用户的现有配置永远优先。
+ */
+function hasUserConfiguredSettings(bucket: unknown): boolean {
+  if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) {
+    return false;
+  }
+
+  const obj = bucket as Record<string, any>;
+  const settings =
+    obj.settings && typeof obj.settings === "object" && !Array.isArray(obj.settings)
+      ? (obj.settings as Record<string, any>)
+      : null;
+
+  return (
+    countMeaningfulArrayEntries(settings?.flows) > 0 ||
+    countMeaningfulArrayEntries(settings?.api_presets) > 0
+  );
+}
+
 export function shouldUseLegacySettingsBucket(
   assistantBucket: unknown,
   legacyBucket: unknown,
 ): boolean {
+  // 硬保护：只要新桶里已经有任何 flow 或 api preset，就坚决不让旧桶覆盖。
+  // 即使评分 < 50（比如用户刚加了一条 flow 但还没配 API），也优先保留用户当前配置。
+  if (hasUserConfiguredSettings(assistantBucket)) {
+    return false;
+  }
+
   const assistantScore = getExtensionSettingsBucketScore(assistantBucket);
   const legacyScore = getExtensionSettingsBucketScore(legacyBucket);
 

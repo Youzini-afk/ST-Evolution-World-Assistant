@@ -87,13 +87,13 @@
               <div class="ew-summary-grid">
                 <article class="ew-summary-card">
                   <h4>工作流数量</h4>
-                  <strong>{{ store.settings.flows.length }}</strong>
-                  <small>总工作流</small>
+                  <strong>{{ store.effectiveFlowsCount }}</strong>
+                  <small>总工作流（含角色卡级）</small>
                 </article>
                 <article class="ew-summary-card">
                   <h4>已启用</h4>
-                  <strong>{{ enabledFlowCount }}</strong>
-                  <small>活跃工作流</small>
+                  <strong>{{ store.effectiveEnabledFlowsCount }}</strong>
+                  <small>活跃工作流（含角色卡级）</small>
                 </article>
                 <article class="ew-summary-card">
                   <h4>API预设</h4>
@@ -786,7 +786,6 @@ function emitFabChanged() {
   }
 }
 
-const enabledFlowCount = computed(() => store.settings.flows.filter(flow => flow.enabled).length);
 const canRerollCurrentFloor = computed(() => {
   return (
     store.settings.enabled &&

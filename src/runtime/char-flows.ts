@@ -18,6 +18,80 @@ import { klona } from 'klona';
 /** 角色卡工作流在世界书中的条目名称 */
 export const CHAR_FLOWS_ENTRY_NAME = 'EW/Flows';
 const CHAR_FLOW_DRAFT_STORAGE_PREFIX = 'ew_char_flow_draft:';
+const CHAR_FLOW_DRAFT_INDEX_KEY = 'ew_char_flow_draft__index';
+// 单条草稿大小上限（字节，stringify 后），保护 localStorage 不被某条爆量草稿挤爆
+const CHAR_FLOW_DRAFT_MAX_BYTES = 512 * 1024;
+// LRU 上限：最多保留 N 个角色的草稿，老的会被删
+const CHAR_FLOW_DRAFT_MAX_ENTRIES = 20;
+
+type DraftIndexEntry = { name: string; at: number };
+
+function readDraftIndex(): DraftIndexEntry[] {
+  try {
+    const raw = globalThis.localStorage?.getItem(CHAR_FLOW_DRAFT_INDEX_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((entry: any) => entry && typeof entry.name === 'string' && entry.name.trim())
+      .map((entry: any) => ({
+        name: String(entry.name),
+        at: Number.isFinite(Number(entry.at)) ? Number(entry.at) : 0,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function writeDraftIndex(entries: DraftIndexEntry[]): void {
+  try {
+    globalThis.localStorage?.setItem(CHAR_FLOW_DRAFT_INDEX_KEY, JSON.stringify(entries));
+  } catch (error) {
+    console.warn('[Evolution World] Failed to write char flow draft index:', error);
+  }
+}
+
+function removeDraftFromStorage(charName: string): void {
+  const key = getCharFlowDraftStorageKey(charName);
+  if (!key) {
+    return;
+  }
+  try {
+    globalThis.localStorage?.removeItem(key);
+  } catch {
+    /* ignore quota / availability errors */
+  }
+}
+
+/**
+ * 维护 LRU 索引：把当前 charName 提升到最新，超过上限的尾部草稿被驱逐。
+ * 也支持显式从索引移除（onlyRemove = true）。
+ */
+function touchDraftIndex(charName: string, options: { onlyRemove?: boolean } = {}): void {
+  const trimmed = normalizeCharDraftName(charName);
+  if (!trimmed) {
+    return;
+  }
+
+  const index = readDraftIndex().filter(entry => entry.name !== trimmed);
+
+  if (!options.onlyRemove) {
+    index.unshift({ name: trimmed, at: Date.now() });
+  }
+
+  if (index.length > CHAR_FLOW_DRAFT_MAX_ENTRIES) {
+    const evicted = index.splice(CHAR_FLOW_DRAFT_MAX_ENTRIES);
+    for (const entry of evicted) {
+      removeDraftFromStorage(entry.name);
+    }
+  }
+
+  writeDraftIndex(index);
+}
 
 /** 角色卡工作流 JSON 包装格式 */
 interface CharFlowsPayload {
@@ -119,7 +193,19 @@ export function writeCharFlowDraft(charName: string, flows: EwFlowConfig[]): voi
       updated_at: Date.now(),
       flows: flows.map(sanitizeFlow),
     };
-    globalThis.localStorage?.setItem(storageKey, JSON.stringify(payload));
+    const serialized = JSON.stringify(payload);
+
+    // 单条大小保护：异常巨大的草稿会塞爆 localStorage 5MB 配额，提示并跳过写入
+    if (serialized.length > CHAR_FLOW_DRAFT_MAX_BYTES) {
+      console.warn(
+        `[Evolution World] char flow draft for "${charName}" is ${serialized.length} bytes, exceeds limit ${CHAR_FLOW_DRAFT_MAX_BYTES}; skipping localStorage write.`,
+      );
+      return;
+    }
+
+    globalThis.localStorage?.setItem(storageKey, serialized);
+    // LRU 维护放在写成功之后，避免写失败也污染索引
+    touchDraftIndex(charName);
   } catch (error) {
     console.warn('[Evolution World] Failed to write char flow draft cache:', error);
   }
@@ -133,6 +219,7 @@ export function clearCharFlowDraft(charName: string): void {
 
   try {
     globalThis.localStorage?.removeItem(storageKey);
+    touchDraftIndex(charName, { onlyRemove: true });
   } catch (error) {
     console.warn('[Evolution World] Failed to clear char flow draft cache:', error);
   }

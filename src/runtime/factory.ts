@@ -1,5 +1,13 @@
+import { klona } from 'klona';
 import { simpleHash } from './helpers';
-import { EwApiPreset, EwApiPresetSchema, EwFlowConfig, EwFlowConfigSchema } from './types';
+import {
+  DEFAULT_PROMPT_ORDER,
+  EwApiPreset,
+  EwApiPresetSchema,
+  EwFlowConfig,
+  EwFlowConfigSchema,
+  EwPromptOrderEntry,
+} from './types';
 
 export function createDefaultApiPreset(index: number): EwApiPreset {
   const id = `api_${index}_${simpleHash(`api-${index}-${Date.now()}`)}`;
@@ -19,6 +27,30 @@ export function createDefaultApiPreset(index: number): EwApiPreset {
 export function createDefaultFlow(index: number, apiPresetId: string): EwFlowConfig {
   const id = `flow_${index}_${simpleHash(`${index}-${Date.now()}`)}`;
   const promptSeed = `${id}-prompt`;
+  // 直接生成完整 prompt_order，避免依赖 normalizeSettings 的 prompt_items 迁移路径。
+  // klona 防止 DEFAULT_PROMPT_ORDER 被引用共享后修改污染。
+  const customPrompts: EwPromptOrderEntry[] = [
+    {
+      identifier: `prompt_${simpleHash(`${promptSeed}-0`)}`,
+      name: '输出格式',
+      enabled: true,
+      type: 'prompt',
+      role: 'system',
+      content: '',
+      injection_position: 'relative',
+      injection_depth: 0,
+    },
+    {
+      identifier: `prompt_${simpleHash(`${promptSeed}-1`)}`,
+      name: '回复风格',
+      enabled: true,
+      type: 'prompt',
+      role: 'system',
+      content: '',
+      injection_position: 'relative',
+      injection_depth: 0,
+    },
+  ];
   return EwFlowConfigSchema.parse({
     id,
     name: `工作流 ${index}`,
@@ -48,26 +80,8 @@ export function createDefaultFlow(index: number, apiPresetId: string): EwFlowCon
       reasoning_effort: 'auto',
       verbosity: 'auto',
     },
-    prompt_items: [
-      {
-        id: `prompt_${simpleHash(`${promptSeed}-0`)}`,
-        name: '输出格式',
-        enabled: true,
-        role: 'system',
-        position: 'relative',
-        trigger_types: ['all'],
-        content: '',
-      },
-      {
-        id: `prompt_${simpleHash(`${promptSeed}-1`)}`,
-        name: '回复风格',
-        enabled: true,
-        role: 'system',
-        position: 'relative',
-        trigger_types: ['all'],
-        content: '',
-      },
-    ],
+    prompt_order: [...klona(DEFAULT_PROMPT_ORDER), ...customPrompts],
+    prompt_items: [],
     api_url: '',
     api_key: '',
     context_turns: 8,

@@ -3,7 +3,9 @@
 
 export const MVU_ENTRY_COMMENT_REGEX = /\[(mvu_update|mvu_plot|initvar)\]/i;
 
-const MVU_UPDATE_BLOCK_REGEX = /\n?<(update(?:variable)?|variableupdate)>(?:(?!<\1>).)*<\/\1?>/gis;
+// 末尾必须是闭合到同一标签名（反向引用 \1）；旧写法 `<\/\1?>` 把 `?` 加在反向引用上，
+// 会让 `</>` 这种异常闭合也被吞掉，可能误匹配越界内容。
+const MVU_UPDATE_BLOCK_REGEX = /\n?<(update(?:variable)?|variableupdate)>(?:(?!<\1>).)*<\/\1>/gis;
 const MVU_STATUS_PLACEHOLDER_REGEX = /\n?<StatusPlaceHolderImpl\/>/gi;
 const MVU_STATUS_CURRENT_VARIABLE_REPLACE_REGEX =
   /\n?<status_current_variables?>[\s\S]*?<\/status_current_variables?>/gi;

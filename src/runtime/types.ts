@@ -397,18 +397,21 @@ export const EwSettingsSchema = z.object({
   workflow_chat_context_mode: z.enum(['host_processed', 'raw_chat_preferred']).default('host_processed'),
   after_reply_delay_seconds: z.coerce.number().min(0).default(0),
   strip_workflow_image_blocks: z.boolean().default(true),
-  auto_reroll_max_attempts: z.coerce.number().int().min(1).default(1),
-  auto_reroll_interval_seconds: z.coerce.number().min(0).default(0),
+  auto_reroll_max_attempts: z.coerce.number().int().min(1).default(3),
+  auto_reroll_interval_seconds: z.coerce.number().min(0).default(5),
   parallel_dispatch_interval_seconds: z.coerce.number().min(0).default(0),
   serial_dispatch_interval_seconds: z.coerce.number().min(0).default(2),
   workflow_timing: z.enum(['after_reply', 'before_reply']).default('after_reply'),
   reroll_scope: z.enum(['all', 'failed_only', 'queued_failed']).default('all'),
+  // 默认更宽容：上游不稳（公益反代/限流/超时）很常见，先自动重试一轮再让用户介入
   failure_policy: z
     .enum(['stop_generation', 'continue_generation', 'retry_once', 'notify_only', 'allow_partial_success'])
-    .default('stop_generation'),
+    .default('retry_once'),
   intercept_release_policy: z.enum(['success_only', 'always', 'never']).default('success_only'),
   controller_entry_prefix: z.string().default('EW/Controller/'),
   dynamic_entry_prefix: z.string().default('EW/Dyn/'),
+  // Controller 备份的 LRU 上限（每个聊天保留最近多少次 Controller 内容，用于回滚）
+  controller_backup_limit: z.coerce.number().int().min(1).max(100).default(10),
   gate_ttl_ms: z.coerce.number().int().positive().default(12000),
   floor_binding_enabled: z.boolean().default(true),
   auto_cleanup_orphans: z.boolean().default(true),
@@ -561,6 +564,11 @@ export const CommitSummarySchema = z.object({
   dyn_entries_updated: z.coerce.number().int().min(0).default(0),
   dyn_entries_removed: z.coerce.number().int().min(0).default(0),
   controller_entries_requested: z.coerce.number().int().min(0).default(0),
+  // 细分计数：分别统计 controller 在本轮的新建/更新/删除条目数。
+  // controller_entries_updated 保留为「总变化数」（兼容旧字段读取方）。
+  controller_entries_created: z.coerce.number().int().min(0).default(0),
+  controller_entries_changed: z.coerce.number().int().min(0).default(0),
+  controller_entries_removed: z.coerce.number().int().min(0).default(0),
   controller_entries_updated: z.coerce.number().int().min(0).default(0),
   write_scope: z
     .enum(['none', 'dyn_only', 'controller_only', 'dyn_and_controller'])

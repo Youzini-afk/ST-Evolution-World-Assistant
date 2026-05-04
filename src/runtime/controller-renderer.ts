@@ -242,5 +242,28 @@ export async function renderControllerTemplate(model: ControllerModel, dynPrefix
 
   const template = parts.join('\n');
   await validateEjsTemplate(template);
+
+  // 诊断日志：用户反馈过「EWA 人设覆盖原人设」类问题，排查时需要看到生成的 EJS。
+  // 加在 validateEjsTemplate 之后，避免在编译失败时输出噪音。
+  if (typeof console !== 'undefined' && console.debug) {
+    try {
+      console.debug('[EW Diagnose] controller template rendered', {
+        template_id: model.template_id,
+        dyn_prefix: dynPrefix,
+        decorators: model.decorators,
+        skip_floor_zero: model.skip_floor_zero,
+        char_detection_present: Boolean(model.char_detection),
+        for_each_count: model.for_each.length,
+        rules_count: model.rules.length,
+        fallback_entries: model.fallback_entries,
+        activate_entries: model.activate_entries,
+        inject_text_count: model.inject_text.length,
+        rendered_template: template,
+      });
+    } catch {
+      // 诊断日志失败不应该影响渲染主流程
+    }
+  }
+
   return template;
 }

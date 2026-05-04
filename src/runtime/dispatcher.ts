@@ -30,6 +30,8 @@ import {
 import { onEvent, EVENT_STREAM_TOKEN, type StopFn } from './compat/events';
 import { resolveGenerateRaw, stopSpecificGeneration, stopGeneration, getStRequestHeaders, getSillyTavernContext } from './compat/generation';
 import { createWorkflowRuntimeError, getWorkflowFailureFromError } from './workflow-error';
+import { redactSensitiveText } from './redaction';
+import { jsonrepair } from 'jsonrepair';
 
 type DispatchInput = {
   settings: EwSettings;
@@ -194,10 +196,78 @@ function getApiHostLabel(apiUrl: string): string {
   }
 }
 
+const HTML_BODY_HINTS = [
+  /^\s*<!doctype\s+html/i,
+  /^\s*<html[\s>]/i,
+  /^\s*<head[\s>]/i,
+  /^\s*<title[\s>]/i,
+  /<\/html>\s*$/i,
+];
+
+/**
+ * 检查响应体是否是 HTML 错误页（Cloudflare/Nginx/反代常见）。
+ * 这种 body 直接展示给用户没意义，反而会污染错误通知。
+ */
+function looksLikeHtmlBody(text: string): boolean {
+  if (!text) {
+    return false;
+  }
+  return HTML_BODY_HINTS.some(re => re.test(text));
+}
+
+function extractHtmlTitle(text: string): string {
+  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(text);
+  if (!titleMatch) {
+    return '';
+  }
+  return titleMatch[1].replace(/\s+/g, ' ').trim();
+}
+
+function describeStatusCategory(status: number): string {
+  if (status === 401) {
+    return '上游 API 鉴权失败：API key 或代理 token 不正确';
+  }
+  if (status === 403) {
+    return '上游 API 拒绝访问：API key 权限不足或被封禁';
+  }
+  if (status === 404) {
+    return '上游 API 路径不存在：检查 API 地址或模型名是否正确';
+  }
+  if (status === 429) {
+    return '上游 API 触发限流：当前 key 或反代正在被限速，建议稍后再试或换备用预设';
+  }
+  if (status >= 500 && status < 600) {
+    if (status === 502) return '上游 API 网关错误（502 Bad Gateway）：反代或上游服务暂时不可用';
+    if (status === 503) return '上游 API 服务不可用（503 Service Unavailable）：上游过载或维护中';
+    if (status === 504) return '上游 API 网关超时（504 Gateway Timeout）：上游响应时间过长';
+    return `上游 API 服务端错误（HTTP ${status}）：通常是反代或模型服务异常`;
+  }
+  return '';
+}
+
 function summarizeStBackendError(flowId: string, status: number, apiUrl: string, errTxt: string): string {
-  const payload = parseStBackendErrorPayload(errTxt);
   const host = getApiHostLabel(apiUrl);
-  const rawMessage = payload?.message || errTxt;
+  const rawTrim = String(errTxt ?? '').trim();
+
+  // 完全为空 → 连接被截断 / 上游没返回任何内容
+  if (!rawTrim) {
+    const category = describeStatusCategory(status);
+    if (category) {
+      return `[${flowId}] ${category}（${host}，响应体为空）`;
+    }
+    return `[${flowId}] 上游 API 返回空响应（${host}，HTTP ${status}）：连接可能被截断`;
+  }
+
+  // HTML 错误页 → 不要把整页 HTML 塞给用户看
+  if (looksLikeHtmlBody(rawTrim)) {
+    const title = extractHtmlTitle(rawTrim);
+    const category = describeStatusCategory(status) || `上游 API 异常（HTTP ${status}）`;
+    const tail = title ? `（${host}，错误页标题：${title}）` : `（${host}，反代返回了 HTML 错误页）`;
+    return `[${flowId}] ${category}${tail}`;
+  }
+
+  const payload = parseStBackendErrorPayload(rawTrim);
+  const rawMessage = payload?.message || rawTrim;
   const normalizedMessage = rawMessage.replace(/\s+/g, ' ').trim();
   const code = payload?.code ?? (normalizedMessage.includes('ECONNRESET') ? 'ECONNRESET' : undefined);
 
@@ -217,7 +287,12 @@ function summarizeStBackendError(flowId: string, status: number, apiUrl: string,
     return `[${flowId}] 上游 API 请求失败：${payload.message}${code ? ` (${code})` : ''}`;
   }
 
+  // 已识别的 status 类别 + 简短消息预览（仅在未命中上面所有特定情况时使用）
+  const category = describeStatusCategory(status);
   const compact = normalizedMessage.length > 180 ? `${normalizedMessage.slice(0, 180)}...` : normalizedMessage;
+  if (category) {
+    return `[${flowId}] ${category}（${host}）：${compact}`;
+  }
   return `[${flowId}] ST backend error: ${status} ${compact}`;
 }
 
@@ -477,9 +552,31 @@ function decodePartialJsonString(raw: string): string {
   return result;
 }
 
+/**
+ * 在流式 fullText 中找到 desired_entries JSON 块的起始位置。
+ * 旧实现是 lastIndexOf('"desired_entries"')，但思考阶段（如 <thinking> 块）也会
+ * 出现这个字符串，导致命中错的位置。这里要求紧跟 ":" + 可选空白 + "[" 才算命中，
+ * 避免抓到散文里的同名提及。
+ */
+function findDesiredEntriesArrayStart(fullText: string): number {
+  const pattern = /"desired_entries"\s*:\s*\[/g;
+  let match: RegExpExecArray | null;
+  let lastValid = -1;
+  while ((match = pattern.exec(fullText))) {
+    lastValid = match.index;
+  }
+  return lastValid;
+}
+
 function extractStreamPreview(fullText: string): WorkflowStreamPreview | undefined {
-  const desiredEntriesIndex = fullText.lastIndexOf('"desired_entries"');
-  const searchArea = desiredEntriesIndex >= 0 ? fullText.slice(desiredEntriesIndex) : fullText;
+  const desiredEntriesIndex = findDesiredEntriesArrayStart(fullText);
+  const searchArea = desiredEntriesIndex >= 0 ? fullText.slice(desiredEntriesIndex) : '';
+
+  // 没命中正式 desired_entries 块就不要预览（避免在思考阶段瞎抓）
+  if (!searchArea) {
+    return undefined;
+  }
+
   const nameField = extractLatestJsonStringField(searchArea, 'name');
   const contentField = extractLatestJsonStringField(searchArea, 'content');
 
@@ -669,50 +766,131 @@ export function buildGenerateRawInvocationForTest(
   return buildGenerateRawInvocation(flow, orderedPrompts, extras);
 }
 
+/**
+ * Stack-based scan for the outermost balanced `{...}` block in `input`.
+ * Aware of JSON string boundaries (incl. escaped quotes), so prose with
+ * stray `{` or `}` won't trip up the slice (which `indexOf/lastIndexOf` would).
+ */
+function findOuterJsonObject(input: string): string | null {
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (inStr) {
+      if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inStr = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inStr = true;
+      continue;
+    }
+
+    if (ch === '{') {
+      if (depth === 0) {
+        start = i;
+      }
+      depth += 1;
+      continue;
+    }
+
+    if (ch === '}') {
+      if (depth === 0) {
+        continue;
+      }
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        return input.slice(start, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function tryParseAsObject(candidate: string): Record<string, any> | null {
+  try {
+    const parsed = JSON.parse(candidate);
+    return _.isPlainObject(parsed) ? (parsed as Record<string, any>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function tryRepairAndParse(candidate: string): Record<string, any> | null {
+  try {
+    const repaired = jsonrepair(candidate);
+    const parsed = JSON.parse(repaired);
+    return _.isPlainObject(parsed) ? (parsed as Record<string, any>) : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseJsonFromText(rawText: string, flowId: string): Record<string, any> {
   const preview = rawText.slice(0, 300);
-
-  // CR-10: Try direct parse first — handles clean JSON output without regex issues
-  try {
-    const direct = JSON.parse(rawText.trim());
-    if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
-      return direct;
-    }
-  } catch {
-    /* fall through to regex extraction */
-  }
   const trimmed = rawText.trim();
+  if (!trimmed) {
+    throw new Error(`[${flowId}] 模型返回了空响应（可能被响应后处理正则清空）`);
+  }
+
   const withoutFence = trimmed
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/i, '')
     .trim();
 
-  try {
-    const parsed = JSON.parse(withoutFence);
-    if (!_.isPlainObject(parsed)) {
-      throw new Error('model output is not a JSON object');
-    }
-    return parsed as Record<string, any>;
-  } catch {
-    const start = withoutFence.indexOf('{');
-    const end = withoutFence.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try {
-        const sliced = withoutFence.slice(start, end + 1);
-        const parsed = JSON.parse(sliced);
-        if (!_.isPlainObject(parsed)) {
-          throw new Error('model output is not a JSON object');
-        }
-        return parsed as Record<string, any>;
-      } catch (error) {
-        throw new Error(`[${flowId}] JSON 解析失败: ${toErrorMessage(error)}\n` + `原始响应前300字: ${preview}`);
-      }
-    }
-    if (!trimmed) {
-      throw new Error(`[${flowId}] 模型返回了空响应（可能被响应后处理正则清空）`);
-    }
-    throw new Error(`[${flowId}] 模型输出中找不到 JSON 对象\n` + `原始响应前300字: ${preview}`);
+  // 1. clean direct parse
+  const direct = tryParseAsObject(withoutFence);
+  if (direct) {
+    return direct;
   }
+
+  // 2. stack-based outermost {...} extraction (string-aware, won't get tripped by prose braces)
+  const outerObject = findOuterJsonObject(withoutFence);
+  if (outerObject) {
+    const sliced = tryParseAsObject(outerObject);
+    if (sliced) {
+      return sliced;
+    }
+    const repairedSlice = tryRepairAndParse(outerObject);
+    if (repairedSlice) {
+      return repairedSlice;
+    }
+  }
+
+  // 3. last-resort jsonrepair on the whole stripped payload
+  const repairedAll = tryRepairAndParse(withoutFence);
+  if (repairedAll) {
+    return repairedAll;
+  }
+
+  // 4. legacy indexOf/lastIndexOf as a backstop (handles edge cases where stack
+  // scan misses a degenerate input)
+  const start = withoutFence.indexOf('{');
+  const end = withoutFence.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    const legacySlice = withoutFence.slice(start, end + 1);
+    const legacyParsed = tryParseAsObject(legacySlice) ?? tryRepairAndParse(legacySlice);
+    if (legacyParsed) {
+      return legacyParsed;
+    }
+    throw new Error(`[${flowId}] JSON 解析失败：模型输出的括号块无法解析\n` + `原始响应前300字: ${preview}`);
+  }
+
+  throw new Error(`[${flowId}] 模型输出中找不到 JSON 对象\n` + `原始响应前300字: ${preview}`);
 }
 
 /**
@@ -767,7 +945,7 @@ function applyResponseRegex(rawText: string, flow: EwFlowConfig): string {
   // Early warning: if post-processing emptied the response
   if (!result && rawText.trim()) {
     console.warn(
-      `[${flow.id}] 响应后处理正则将整个响应清空了！原始长度=${rawText.length}, 请检查 remove/extract 正则配置。原始内容前200字: ${rawText.slice(0, 200)}`,
+      `[${flow.id}] 响应后处理正则将整个响应清空了！原始长度=${rawText.length}, 请检查 remove/extract 正则配置。原始内容前200字: ${redactSensitiveText(rawText.slice(0, 200))}`,
     );
   }
 
@@ -1335,7 +1513,7 @@ async function executeFlowAttemptInternal(
           );
         } catch (error) {
           console.warn(
-            `[EW] Flow "${flow.id}": generateRaw.custom_api failed, fallback to ST backend — ${toErrorMessage(error)}`,
+            `[EW] Flow "${flow.id}": generateRaw.custom_api failed, fallback to ST backend — ${redactSensitiveText(toErrorMessage(error))}`,
           );
           const fallbackRequestBody = buildPresetStBackendRequestBody(flow, apiPreset, orderedPrompts);
           requestDebug = {
@@ -1444,7 +1622,7 @@ async function executeFlow(
   }
 
   console.warn(
-    `[EW] Flow "${flow.id}": structured output unsupported, retrying with structured_output=off — ${firstAttempt.error}`,
+    `[EW] Flow "${flow.id}": structured output unsupported, retrying with structured_output=off — ${redactSensitiveText(firstAttempt.error ?? '')}`,
   );
   onProgress?.({
     phase: 'dispatching',

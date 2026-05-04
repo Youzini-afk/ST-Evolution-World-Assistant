@@ -1,11 +1,37 @@
-﻿import { now, simpleHash } from './helpers';
+﻿import { getCurrentChatIdSafe } from '../st-adapter';
+import { now, simpleHash } from './helpers';
 import { EwSettings } from './types';
 
 const DRY_RUN_PROMPT_PREVIEW_BRIDGE_MS = 1200;
 const MVU_EXTRA_ANALYSIS_GUARD_TTL_MS = 2500;
 const PROMPT_VIEWER_SEND_INTENT_TTL_MS = 60000;
 
+/**
+ * 取当前聊天 ID，用于把 send/intent/generation/after-reply 记录绑定到具体聊天。
+ * 切聊天后，旧 chat 记录应当被视为「不属于当前聊天」，避免误触发。
+ */
+function currentChatScope(): string {
+  try {
+    return getCurrentChatIdSafe();
+  } catch {
+    return '';
+  }
+}
+
+function isRecordFromCurrentChat(recordChatId: string | undefined): boolean {
+  const current = currentChatScope();
+  // 没拿到当前 chatId 就放行（保守兜底，避免破坏未指定聊天上下文的测试或边缘场景）
+  if (!current || current === 'unknown') {
+    return true;
+  }
+  if (!recordChatId) {
+    return true;
+  }
+  return recordChatId === current;
+}
+
 type SendRecord = {
+  chat_id: string;
   message_id: number;
   user_input: string;
   hash: string;
@@ -13,12 +39,14 @@ type SendRecord = {
 };
 
 type SendIntentRecord = {
+  chat_id: string;
   user_input: string;
   hash: string;
   at: number;
 };
 
 type GenerationRecord = {
+  chat_id: string;
   seq: number;
   type: string;
   params: {
@@ -31,6 +59,7 @@ type GenerationRecord = {
 };
 
 type AfterReplyRecord = {
+  chat_id: string;
   pending_user_message_id: number | null;
   pending_user_input: string;
   pending_generation_type: string;
@@ -67,6 +96,7 @@ const state: RuntimeState = {
   last_send_intent: null,
   last_generation: null,
   after_reply: {
+    chat_id: '',
     pending_user_message_id: null,
     pending_user_input: '',
     pending_generation_type: '',
@@ -89,12 +119,15 @@ export function getRuntimeState(): RuntimeState {
 }
 
 export function recordUserSend(message_id: number, user_input: string) {
+  const chatId = currentChatScope();
   state.last_send = {
+    chat_id: chatId,
     message_id,
     user_input,
     hash: simpleHash(user_input),
     at: now(),
   };
+  state.after_reply.chat_id = chatId;
   state.after_reply.pending_user_message_id = message_id;
   state.after_reply.pending_user_input = user_input;
   state.after_reply.pending_at = now();
@@ -103,6 +136,7 @@ export function recordUserSend(message_id: number, user_input: string) {
 
 export function recordUserSendIntent(user_input: string) {
   state.last_send_intent = {
+    chat_id: currentChatScope(),
     user_input,
     hash: simpleHash(user_input),
     at: now(),
@@ -115,7 +149,9 @@ export function clearSendIntent(): void {
 
 export function recordGeneration(type: string, params: Record<string, any> | undefined, dry_run: boolean) {
   generationSeq += 1;
+  const chatId = currentChatScope();
   state.last_generation = {
+    chat_id: chatId,
     seq: generationSeq,
     type,
     params: (params ?? {}) as GenerationRecord['params'],
@@ -123,6 +159,9 @@ export function recordGeneration(type: string, params: Record<string, any> | und
     at: now(),
   };
 
+  if (!state.after_reply.chat_id) {
+    state.after_reply.chat_id = chatId;
+  }
   state.after_reply.pending_generation_type = type;
   state.after_reply.pending_generation_seq = state.last_generation.seq;
   if (!state.after_reply.pending_at) {
@@ -171,7 +210,8 @@ export function hasFreshSendIntent(
   return Boolean(
     record?.user_input &&
       record.at &&
-      currentAt - record.at <= resolvedTtlMs,
+      currentAt - record.at <= resolvedTtlMs &&
+      isRecordFromCurrentChat(record.chat_id),
   );
 }
 
@@ -307,6 +347,7 @@ export function clearSendContextIfMatches(message_id: number | null, user_input?
 }
 
 export function clearAfterReplyPending() {
+  state.after_reply.chat_id = '';
   state.after_reply.pending_user_message_id = null;
   state.after_reply.pending_user_input = '';
   state.after_reply.pending_generation_type = '';
@@ -461,8 +502,12 @@ export function shouldHandleGenerationAfter(
 
   const lastSend = state.last_send;
   const lastIntent = state.last_send_intent;
-  const hasFreshSend = Boolean(lastSend && now() - lastSend.at <= settings.gate_ttl_ms);
-  const hasFreshIntent = Boolean(lastIntent && now() - lastIntent.at <= settings.gate_ttl_ms);
+  const hasFreshSend = Boolean(
+    lastSend && now() - lastSend.at <= settings.gate_ttl_ms && isRecordFromCurrentChat(lastSend.chat_id),
+  );
+  const hasFreshIntent = Boolean(
+    lastIntent && now() - lastIntent.at <= settings.gate_ttl_ms && isRecordFromCurrentChat(lastIntent.chat_id),
+  );
 
   if (!hasFreshSend && !hasFreshIntent) {
     return { ok: false, reason: 'missing_send_context' };
@@ -493,8 +538,16 @@ export function shouldHandleAfterReply(
   }
 
   const windowMs = Math.max(settings.total_timeout_ms + 10000, settings.gate_ttl_ms, 600000);
-  const hasFreshPending = Boolean(state.after_reply.pending_at && now() - state.after_reply.pending_at <= windowMs);
-  const hasFreshGeneration = Boolean(state.last_generation && now() - state.last_generation.at <= windowMs);
+  const hasFreshPending = Boolean(
+    state.after_reply.pending_at &&
+      now() - state.after_reply.pending_at <= windowMs &&
+      isRecordFromCurrentChat(state.after_reply.chat_id),
+  );
+  const hasFreshGeneration = Boolean(
+    state.last_generation &&
+      now() - state.last_generation.at <= windowMs &&
+      isRecordFromCurrentChat(state.last_generation.chat_id),
+  );
 
   if (!hasFreshPending && !hasFreshGeneration) {
     return { ok: false, reason: 'missing_generation_context' };

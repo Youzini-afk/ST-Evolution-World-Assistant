@@ -1196,8 +1196,37 @@ export async function evalEjsTemplate(
     return result ?? '';
   } catch (e) {
     console.warn('[EW EJS Internal] Template render failed:', e);
+    notifyEjsFailureOnce(e, content);
     // Return raw content on failure rather than breaking the pipeline
     return content;
+  }
+}
+
+// 节流弹窗，避免一轮渲染里 N 个条目挂同一个错误时把通知刷爆
+let lastEjsErrorAt = 0;
+let lastEjsErrorKey = '';
+const EJS_ERROR_TOAST_GAP_MS = 4000;
+
+function notifyEjsFailureOnce(error: unknown, content: string): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const key = `${message}|${content.slice(0, 80)}`;
+  const now = Date.now();
+  if (key === lastEjsErrorKey && now - lastEjsErrorAt < EJS_ERROR_TOAST_GAP_MS) {
+    return;
+  }
+  lastEjsErrorKey = key;
+  lastEjsErrorAt = now;
+
+  try {
+    const toastr = (globalThis as any).toastr;
+    const summary = message.replace(/\s+/g, ' ').slice(0, 200);
+    toastr?.warning?.(
+      `EJS 渲染失败，原始内容已照常输出（详见控制台）：${summary}`,
+      'Evolution World',
+      { timeOut: 5000 },
+    );
+  } catch {
+    // toastr 不可用就保持沉默 — 已经 console.warn 过了
   }
 }
 

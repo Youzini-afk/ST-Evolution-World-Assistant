@@ -172,7 +172,33 @@ export function redactSensitiveText(value: string): string {
   next = next.replace(/("headers_json"\s*:\s*")([^"]*)(")/gi, `$1${REDACTED_SECRET}$3`);
   next = next.replace(/("key"\s*:\s*")([^"]*)(")/gi, `$1${REDACTED_SECRET}$3`);
 
+  // 头部行格式（Anthropic / OpenRouter / 自建反代常见命名）
+  next = next.replace(/((?:^|[\s,;])(?:x-api-key|api-key|x-auth-token|x-goog-api-key|anthropic-auth)\s*[:=]\s*)([^\s,;]+)/gi, `$1${REDACTED_SECRET}`);
+
+  // URL query 中的 key（Gemini / 某些反代用 ?key=...&api_key=...）
+  next = next.replace(/([?&](?:key|api_key|access_token|token)=)([^&\s"']+)/gi, `$1${REDACTED_SECRET}`);
+
   return next;
+}
+
+/**
+ * 用于 console.error/warn 输出之前包一层，避免错误消息里携带的 URL / header / token 直接打到日志。
+ * 接受任意类型，按 string / object / Error 分别处理。
+ */
+export function redactForLog(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return redactSensitiveText(value);
+  }
+  if (value instanceof Error) {
+    // 不修改原 error，构造一个新 Error 让消息可读但不泄密
+    const safe = new Error(redactSensitiveText(value.message));
+    safe.name = value.name;
+    return safe;
+  }
+  if (Array.isArray(value) || isPlainObject(value)) {
+    return redactDebugPayload(value);
+  }
+  return value;
 }
 
 export function redactDebugPayload(value: unknown, path: string[] = []): unknown {

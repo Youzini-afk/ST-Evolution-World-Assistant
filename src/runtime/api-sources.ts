@@ -268,9 +268,9 @@ export function normalizeApiBaseUrl(source: string | undefined | null, rawUrl: s
   }
 
   if (normalizedSource === 'makersuite') {
-    next = next.replace(/\/models$/i, '');
-    next = next.replace(/\/v1beta$/i, '');
-    next = next.replace(/\/v1$/i, '');
+    // 只剥末端的模型调用端点（如 /models 或 /models/<model>:<method>），
+    // 保留用户特意填写的版本路径（/v1 / /v1beta），不再强制去掉。
+    next = next.replace(/\/models(?:\/[^/]+(?::\w+)?)?$/i, '');
     return next;
   }
 
