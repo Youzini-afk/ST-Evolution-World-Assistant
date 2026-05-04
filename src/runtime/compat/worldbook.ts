@@ -150,20 +150,42 @@ const POSITION = {
   outlet: 7,
 } as const;
 
+// 字符串值统一用 EWA schema 的 snake_case 风格（与 worldinfo-engine.ts normalizeEntry 的 if 链对齐 +
+// 与 types.ts DynWorldbookProfileSchema 默认值对齐）。旧版本用过 PascalCase 形式
+// （'ANTop' / 'EMTop' / 'atDepth'），STR_TO_NUM 兼容这两种 input 以容错。
 const POSITION_NUM_TO_STR: Record<number, string> = {
-  [POSITION.before]: 'before',
-  [POSITION.after]: 'after',
-  [POSITION.ANTop]: 'ANTop',
-  [POSITION.ANBottom]: 'ANBottom',
-  [POSITION.atDepth]: 'atDepth',
-  [POSITION.EMTop]: 'EMTop',
-  [POSITION.EMBottom]: 'EMBottom',
+  [POSITION.before]: 'before_character_definition',
+  [POSITION.after]: 'after_character_definition',
+  [POSITION.ANTop]: 'before_author_note',
+  [POSITION.ANBottom]: 'after_author_note',
+  [POSITION.atDepth]: 'at_depth',
+  [POSITION.EMTop]: 'before_example_messages',
+  [POSITION.EMBottom]: 'after_example_messages',
   [POSITION.outlet]: 'outlet',
 };
 
-const POSITION_STR_TO_NUM: Record<string, number> = Object.fromEntries(
-  Object.entries(POSITION_NUM_TO_STR).map(([k, v]) => [v, Number(k)]),
-);
+const POSITION_STR_TO_NUM: Record<string, number> = {
+  // snake_case（新规范，与 EWA schema / worldinfo-engine 对齐）
+  before_character_definition: POSITION.before,
+  after_character_definition: POSITION.after,
+  before_author_note: POSITION.ANTop,
+  after_author_note: POSITION.ANBottom,
+  at_depth: POSITION.atDepth,
+  at_depth_as_system: POSITION.atDepth,
+  at_depth_as_user: POSITION.atDepth,
+  at_depth_as_assistant: POSITION.atDepth,
+  before_example_messages: POSITION.EMTop,
+  after_example_messages: POSITION.EMBottom,
+  outlet: POSITION.outlet,
+  // 短别名 + 旧 PascalCase（向后兼容历史数据）
+  before: POSITION.before,
+  after: POSITION.after,
+  ANTop: POSITION.ANTop,
+  ANBottom: POSITION.ANBottom,
+  atDepth: POSITION.atDepth,
+  EMTop: POSITION.EMTop,
+  EMBottom: POSITION.EMBottom,
+};
 
 // ── 内部辅助 ─────────────────────────────────────────
 
